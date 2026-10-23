@@ -87,6 +87,54 @@ const wink = note("c2 c2 c3 c2 ~ c2 c3 ~ c2 c2 c3 c2 ~ eb2 c3 ~")
 // rangex sweeps exponentially, which sounds more even than a linear sweep
 const winkSweep = wink.lpf(tri.rangex(900, 4000).slow(4))
 
+// Higher State recipe (from Bthelick's breakdown video):
+// - the 303's "square" was a clipped saw, slightly asymmetric: pulse with
+//   pw off 50% is what makes it sound like the record (try .35 - .45)
+// - two 303s layered an octave apart
+// - bass rolled off BEFORE the drive (guitar pedal style), so the drive
+//   hits the resonant peak instead of the low end
+// - resonance into heavy distortion is the actual acid scream
+// - riff is in G major. PLACEHOLDER notes, not the real riff
+const higherState = note("c3 ~ c3 ~ ~ c3 ~ c3 c3 ~ ~ c3 ~ c3 ~ c3")
+  .superimpose(x => x.add(note(12)))  // second 303 an octave up
+  .s("pulse")
+  // .pw(.4)                  // asymmetric square
+  .lpf(2000)
+  // .lpq(20)
+  .lpenv(.9)
+  .lpdecay(.2)
+  .hpf(400)                           // roll off bass before the drive
+  .distort(6)
+  .gain(.003)               // distort up -> gain down
+const higherStateFew = note("c3 ~ c3 ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~")
+  .superimpose(x => x.add(note(12)))  // second 303 an octave up
+  .s("pulse")
+  // .pw(.4)                  // asymmetric square
+  .lpf(2000)
+  // .lpq(20)
+  .lpenv(.9)
+  .lpdecay(.2)
+  .hpf(400)                           // roll off bass before the drive
+  .distort(6)
+  .decay(0.2)
+  .gain(.003)               // distort up -> gain down
+const higherState2 = note("c3 ~ c3 ~ ~ c3 ~ ~ ~ ~ ~ ~ ~ ~ ~ c3")
+  .superimpose(x => x.add(note(12)))  // second 303 an octave up
+  .s("pulse")
+  // .pw(.4)                  // asymmetric square
+  .lpf(2000)
+  // .lpq(20)
+  .lpenv(.9)
+  .lpdecay(.2)
+  .hpf(400)                           // roll off bass before the drive
+  .distort(6)
+  .gain(.003)   
+// the record's second half: filter played live and drive pushed harder.
+// tri sweeps cutoff up and back over 4 bars, drive climbs over 16 bars
+const higherStateLive = higherState
+  .lpf(tri.rangex(800, 5000).slow(4))
+  .distort(saw.range(2, 5).slow(16))
+
 
 
 // house string: one high note held for 4 bars. slow attack fades it in,
@@ -108,29 +156,54 @@ const houseStringFadeIn = houseString.attack(4 / (130/60/4))
 // const houseString = note("c5").slow(4).s("gm_string_ensemble_1")
 //   .attack(.8).release(2).room(.6).roomsize(4).orbit(3).gain(.5)
 
+
+// riser for a 4-bar section: noise whoosh + snare roll that speeds up.
+// saw.slow(4) goes 0 -> 1 over the 4 bars. Each step reads it at its start,
+// so the noise is chopped into 16ths to make the sweep move smoothly
+const riser = stack(
+  // white noise: the highpass opens upward and the volume swells
+  s("white*16")
+    .hpf(saw.rangex(200, 10000).slow(4))
+    .gain(saw.range(0, .15).slow(4))
+    .attack(.01).release(.05),
+  // snare roll: 4, then 8, 16, 32 hits per bar, getting louder
+  s("sd*<4 8 16 32>").bank("RolandTR909")
+    .gain(saw.range(.05, .3).slow(4))
+)
+
 // 1 cycle = 1 bar = 4 beats, so [4, ...] = 16 beats
 
 arrange(
-  // intro
-  [4, stack(kick, rumble)],
-  [4, stack(kick.mask("<1!3 [1 1 1 0]>"), rumble, snare)],
-  [4, stack(kick, rumble, snare, hats)],
-  [4, stack(kick, rumble, snare, hats, tom)],
+  // // intro
+  // [4, stack(kick, rumble)],
+  // [4, stack(kick.mask("<1!3 [1 1 1 0]>"), rumble, snare)],
+  // [4, stack(kick, rumble, snare, hats)],
+  // [4, stack(kick, rumble, snare, hats, tom)],
   
   // [8, stack(kick, rumble, snare, hats, tom)],
-  [4, stack(kick, rumble, snare, hats, tom)],
-  [4, stack(snare, hats, tom)],
-  [8, stack(kick.mask("<1!3 [1 1 0 0]>"), rumble, hats, acid)],
+  // [4, stack(kick, rumble, snare, hats, tom)],
+  // [4, stack(snare, hats, tom)],
+  // [8, stack(kick.mask("<1!3 [1 1 0 0]>"), rumble, hats, acid)],
+  // [4, stack(hats, acid)],
 
-  [8, stack(kick.mask("<1!3 [1 1 1 0]>"), rumble, openHats, acid)],
-  [8, stack(kick, rumble, openHats, snare, tom, acid)],
-  [8, stack(hats, snare, tom, wink)],
-  [8, stack(kick, rumble, rumble, hats, snare, winkSweep)],
+  [1, stack(hats)],
+  [1, stack(hats, snare)],
+  [2, stack(hats, snare, higherState2)],
+  [4, stack(hats, higherState, riser)],
+  [8, stack(kick.mask("<1!7 [1 1 0 0]>"), rumble, hats, snare, higherState)],
+  [8, stack(kick.mask("<1!7 [0 0 0 0]>"), rumble, hats, snare, tom, higherState)],
 
-  [16, stack(kick, rumble, rumble, openHats, snare, wink.gain(0.05), acid)],
+  [8, stack(kick.mask("<1!3 [1 1 1 0]>"), rumble, openHats, higherState)],
+  [8, stack(kick, rumble, openHats, snare, tom, acid, higherStateFew)],
+  // [8, stack(hats, snare, tom, wink)],
+  // [8, stack(kick, rumble, rumble, hats, snare, winkSweep)],
+
+  // [16, stack(kick, rumble, rumble, openHats, snare, wink.gain(0.05), acid)],
 
   // [8, stack(kick, rumble, hats, snare, alarm)],
   // [8, stack(kick, rumble, hats, snare, scream)],
   // [8, stack(kick, rumble, hats, tom, hoover)],
+  // [8, stack(kick, rumble, hats, higherState)],
+  // [8, stack(kick, rumble, hats, snare, higherStateLive)],
 )
 

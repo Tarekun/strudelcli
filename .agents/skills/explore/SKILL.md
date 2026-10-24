@@ -54,7 +54,7 @@ plain `bd` sample set. The first `list`/`like` of a kind measures all its sample
 
    `--replace` takes the name as the section stacks it (`structure.mjs` lists those). For a bank-less sample set, write the expression in full and copy the processing over. Without `--over`, `--pattern 's("$*4")'` sets the pattern a sound plays (`$` stands for the sound).
 5. **Let the user listen.**
-   - With `--play`, the reel plays in VSCode, but it replaces whatever is playing, so never use it during a DJ set.
+   - With `--play`, the reel plays in VSCode, on top of a DJ set if one is playing, so don't use it during one.
    - Without it, tell them to open the reel and press Ctrl+Enter.
    - Give them a numbered list with one phrase per candidate, taken from the numbers: "2: lower and boomier, less click", "3: much longer tail, 808-like".
    - The `peak` column in `list` shows how hot each sample is. Mention candidates that are much louder or quieter, since the louder one usually sounds better at first.

@@ -1,12 +1,13 @@
 ---
 name: dj
-description: Run a live DJ set in the user's VSCode, writing each 5+ minute section while the previous one plays and queueing it to swap in on the downbeat. Wakes itself up to keep the set going. Use when asked to DJ, play a live set, or keep music going. Not for composing a finished track (compose) or reviewing one (review).
+description: Run a live DJ set through the speakers (no VSCode needed), writing each 5+ minute section while the previous one plays and queueing it to swap in on the downbeat. Wakes itself up to keep the set going. Use when asked to DJ, play a live set, or keep music going. Not for composing a finished track (compose) or reviewing one (review).
 ---
 
 # DJ
 
 You run a live set: you keep **two sections queued ahead** of the one playing (5+ minutes each), and `toolkit/dj.mjs`
-swaps them in on the right bar. With two ahead, a late wake-up still has a whole section of slack. Being on time matters more than polish. Don't run `validate.mjs`, `inspect.mjs`, `review.sh` or the
+renders each one to audio in the background (about a minute) and swaps it in on the right bar. The music plays
+through PipeWire, not VSCode. With two ahead, a late wake-up still has a whole section of slack. Being on time matters more than polish. Don't run `validate.mjs`, `inspect.mjs`, `review.sh` or the
 compose or review workflows during a set: `start` and `queue` already validate and measure each section, and its output is
 the only feedback you need.
 
@@ -14,15 +15,16 @@ the only feedback you need.
 
 | command | does |
 |---|---|
-| `node toolkit/dj.mjs start <set> <file>` | checks the first section and plays it |
-| `node toolkit/dj.mjs queue <set> <file>` | checks a section and adds it to the queue: each swaps in when the one before ends (late = on the next 16-bar phrase). `--replace` empties the queue first |
+| `node toolkit/dj.mjs start <set> <file>` | checks the first section and renders it; it starts playing when the render is done, usually within a minute |
+| `node toolkit/dj.mjs queue <set> <file>` | checks a section, adds it to the queue and renders it: each swaps in when the one before ends (not rendered by then = on a later 16-bar phrase). `--replace` empties the queue first |
+| `node toolkit/dj.mjs now <set> [file]` | re-renders the playing section from its edited file and swaps it in on the next phrase after that, usually within a minute |
 | `node toolkit/dj.mjs unqueue <set> [n]` | removes the n-th queued section (1 = next up), default the last |
 | `node toolkit/dj.mjs skip <set>` | cuts the current section short: the next queued one swaps in on the next 16-bar phrase |
-| `node toolkit/dj.mjs status <set> --json` | what plays, the queue with start times, `ahead` (sections queued), and `wakeIn`: 0 = write now, otherwise seconds to sleep |
+| `node toolkit/dj.mjs status <set> --json` | what plays, the queue with start times and render progress, `ahead` (sections queued), and `wakeIn`: 0 = write now, otherwise seconds to sleep |
 | `node toolkit/dj.mjs wait <set>` | blocks until the next queued section swaps in (exit 3 = run it again) |
 | `node toolkit/dj.mjs stop <set>` | stops playback and empties the queue |
 
-`<set>` is `live/<name>/`. Don't edit its `live.strudel.js` or `dj.json`, except for an immediate change (below).
+`<set>` is `live/<name>/`. Don't edit its `dj.json` or `deck.json`.
 
 ## 1. Ask, then plan
 
@@ -73,7 +75,7 @@ On every wake-up:
 3. Tell the user in one line what's playing and what's queued.
 4. Sleep `wakeIn` seconds. That's just after the next swap, when the queue is one short again.
 
-At the start, that means: `start` section 1, then write and queue sections 2 and 3 before the first sleep.
+At the start, that means: `start` section 1, then write and queue sections 2 and 3 while it renders, before the first sleep.
 Two ahead is the limit, though: more than that and the plan can't react to the user anymore.
 
 How to sleep:
@@ -86,6 +88,7 @@ How to sleep:
 played (its `in` from `queue` plus its length), then run `stop` and end the loop. If the user says stop now, run `stop` right away.
 
 **User requests mid-set:** fold "more X" into the next section you write and `plan.md`. If a queued section no longer
-fits, `unqueue` it and write a new one. For "next!" or "this is dragging", run `skip`. It needs something queued. For "do X now", edit
-`live/<name>/live.strudel.js` directly, and keep the `.late(n)` after its arrange. Make the same change in that
-section's own file. If the music dies, check the end of `dj.log` and `.strudel-remote.log`, and `start` again with the current section.
+fits, `unqueue` it and write a new one. For "next!" or "this is dragging", run `skip`. It needs something queued. For "do X now", edit the playing
+section's own file (same length), run `now`, and tell the user it lands on the next phrase after its render, usually within a minute. It lasts
+until that section ends, so make the same change in the queued sections that should keep it. If the music dies, check the end of
+`dj.log`, and `start` again with the current section.

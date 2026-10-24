@@ -43,8 +43,7 @@ well it is written.
 How easy the track is to read, change and keep working.
 
 - **Errors and risks:** validate errors and warnings, `slider()` (breaks the VSCode extension), `.bank()` on
-  synths, superdirt-only functions that do nothing in the browser (`library.mjs function <name>` flags them),
-  and `gm_*` sounds, which the toolkit can't check.
+  synths, and superdirt-only functions that do nothing in the browser (`library.mjs function <name>` flags them).
 - **Dead code:** definitions `structure.mjs` lists as never reaching the arrange, and commented-out blocks.
 - **Duplication:** the same pattern or effect chain written several times, where a shared `const` or a
   derived variant (`const kickFill = kick.mask(...)`) would do.

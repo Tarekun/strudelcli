@@ -25,7 +25,7 @@ small diff.
 For designing a new instrument or track, or a mix pass, use the `compose` skill (`.agents/skills/compose`).
 For mastering or exporting a playable file, use the `master` skill (`.agents/skills/master`).
 For feedback on a track (code, mix, composition), use the `review` skill (`.agents/skills/review`).
-For a live DJ set played in VSCode, use the `dj` skill (`.agents/skills/dj`).
+For a live DJ set, use the `dj` skill (`.agents/skills/dj`).
 For looking for a sound or ideas ("a different kick", "what could I add"), use the `explore` skill (`.agents/skills/explore`).
 
 ### Instruments copied from other tracks
@@ -40,6 +40,6 @@ If it really has to change to fit, don't edit the copy. Ask the user, or derive 
 - **`.bank("X")` prefixes the sound name.** `s("sh").bank("RolandTR909")` looks for `RolandTR909_sh`. A bank only has its own sounds; validate reports missing ones with line numbers.
 - **Synths can't take a bank.** `s("white")`, `s("sawtooth")`, `s("supersaw")` and the like must not get `.bank(...)`.
 - **`slider()` silently breaks** evaluation in the user's VSCode Strudel extension. Use constants.
-- **`gm_*` soundfonts** play in the extension, but the toolkit doesn't load them, so validate only warns about them.
+- **`gm_*` soundfonts** take notes (`note("c3 e3").s("gm_epiano1")`) and `.n(i)` picks one of the instrument's fonts. Some fonts don't cover every note: validate reports "no soundfont buffer found" for notes that stay silent.
 - **`distort` and `shape` add a lot of level.** If you add one to an instrument you're writing, lower that instrument's `gain` to match.
 - **Sidechain:** an instrument on the orbit named in the kick's `duckorbit(n)` gets ducked by the kick. Solo measurements in `inspect.mjs` don't include that ducking.

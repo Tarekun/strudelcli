@@ -1,38 +1,45 @@
 # AGENTS.md
 
-This project is a music track creation tool built on top of strudel — a framework for generating musical patterns.
+Tracks in this repo are [Strudel](https://strudel.cc) code: `*.strudel.js` files, grouped by genre
+(`techno/`, `house/`, `sets/`, ...). Most define their instruments as `const`s and lay them out in an
+`arrange([bars, stack(...)], ...)` at the bottom. The toolkit's instrument and section names come from that arrange.
 
-## Validation
+You can't hear the music. Whether something *sounds* right is the user's call: when a change is about taste,
+say what you changed and ask them to listen.
 
-Use the toolkit to validate tracks before and after editing:
+## Editing a track
 
-```sh
-node toolkit/validate.mjs <track.strudel.js>
-```
+Do what was asked and nothing more. A one-line request (add a hi-hat, change a note, mute a section) is a
+small diff.
 
-This checks that the track parses correctly, produces events, references existing sounds, and renders to audio
+- Don't touch the gain, filters or effects of existing instruments, and don't rebalance the mix, unless asked.
+  Levels are the user's call.
+- Don't render, analyze loudness or run `review.sh` unless asked. Those results lead to extra code the user
+  didn't request.
+- Don't refactor or tidy code you weren't asked to change.
+- After editing, run `node toolkit/validate.mjs <track>`. It must exit 0 (1 = errors, 2 = couldn't run). Fix
+  errors, and read the warnings (clipping, silent sections).
+- Check that functions and sounds exist with `node toolkit/library.mjs functions <words>` or `sounds <query>`
+  instead of guessing names.
 
-## Toolkit Tools
+For designing a new instrument or track, or a mix pass, use the `compose` skill (`.agents/skills/compose`).
+For mastering or exporting a playable file, use the `master` skill (`.agents/skills/master`).
+For feedback on a track (code, mix, composition), use the `review` skill (`.agents/skills/review`).
+For a live DJ set played in VSCode, use the `dj` skill (`.agents/skills/dj`).
+For looking for a sound or ideas ("a different kick", "what could I add"), use the `explore` skill (`.agents/skills/explore`).
 
-- `arrange.mjs` — Parses and arranges a track
-- `evaluate` / `renderChunk` — Evaluate events and render audio
-- `review.sh` — Review script for tracks
-- `analyze.py` — Analysis tool
-- `page.html` / `render.mjs` — Browser-based rendering
+### Instruments copied from other tracks
 
-## Workflow
+When a track reuses an instrument from another track in this repo, copy its definition verbatim and
+leave it as it is. Never rewrite it, re-tune it or "improve" it: the user picked it because they like it as it is.
+If it really has to change to fit, don't edit the copy. Ask the user, or derive a variant from it under a new name
+(`const leadDark = lead.lpf(1200)`) and leave the copied definition untouched.
 
-1. Make edits to a `.strudel.js` track
-2. Run validation with `node toolkit/validate.mjs <track>`
-3. Use the toolkit tools to test and render the result
-4. Ensure all referenced sounds exist in the project
+## Things that trip tracks up
 
-## Example
-
-```sh
-# Validate a track
-node toolkit/validate.mjs metalgrind.strudel.js
-
-# Render to audio
-node toolkit/render.mjs metalgrind.strudel.js --full
-```
+- **`.bank("X")` prefixes the sound name.** `s("sh").bank("RolandTR909")` looks for `RolandTR909_sh`. A bank only has its own sounds; validate reports missing ones with line numbers.
+- **Synths can't take a bank.** `s("white")`, `s("sawtooth")`, `s("supersaw")` and the like must not get `.bank(...)`.
+- **`slider()` silently breaks** evaluation in the user's VSCode Strudel extension. Use constants.
+- **`gm_*` soundfonts** play in the extension, but the toolkit doesn't load them, so validate only warns about them.
+- **`distort` and `shape` add a lot of level.** If you add one to an instrument you're writing, lower that instrument's `gain` to match.
+- **Sidechain:** an instrument on the orbit named in the kick's `duckorbit(n)` gets ducked by the kick. Solo measurements in `inspect.mjs` don't include that ducking.

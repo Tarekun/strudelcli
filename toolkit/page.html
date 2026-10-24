@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>strudel offline render</title>
+<script type="module">
+  import * as S from '/node_modules/@strudel/web/dist/index.mjs';
+
+  window.S = S;
+
+  // superdough pools filters, compressors and synth worklets to reuse them
+  // (held as WeakRefs), but every render here has its own OfflineAudioContext
+  // and a node can't connect across contexts. nodes left over from an earlier
+  // render dereference as gone, so the pool builds fresh ones
+  const deref = WeakRef.prototype.deref;
+  WeakRef.prototype.deref = function () {
+    const target = deref.call(this);
+    return target instanceof AudioNode && target.context !== S.getAudioContext() ? undefined : target;
+  };
+
+  // same sample maps the VSCode extension (cmillsdev.strudelvs) prebakes
+  const ds = 'https://raw.githubusercontent.com/felixroos/dough-samples/main';
+  const maps = ['tidal-drum-machines', 'piano', 'Dirt-Samples', 'EmuSP12', 'vcsl'];
+
+  window.ready = S.initStrudel({
+    prebake: () => Promise.all(maps.map((m) => S.samples(`${ds}/${m}.json`))),
+  }).then((repl) => (window.repl = repl));
+
+  // superdough voices for the notes starting in [from, to) cycles
+  async function schedule({ pattern, begin, cps }, from, to) {
+    const haps = pattern
+      .queryArc(from, to, { _cps: cps })
+      .filter((hap) => hap.hasOnset() && hap.whole.begin.valueOf() >= from && hap.whole.begin.valueOf() < to)
+      .sort((a, b) => a.whole.begin.valueOf() - b.whole.begin.valueOf());
+    for (const hap of haps) {
+      const t = (hap.whole.begin.valueOf() - begin) / cps;
+      try {
+        hap.ensureObjectValue(); // throws for plain values with no .s() or .note()
+        await S.superdough(hap.value, t, hap.duration / cps, cps, t);
+      } catch (err) {
+        console.error(String(err?.message ?? err));
+      }
+    }
+  }
+
+  // renderPatternAudio creates the voices for every note before rendering,
+  // and chromium processes all of them on every block even before they
+  // start, so the cost grows with the square of the length. instead it is
+  // handed silence (it still sets up the context, worklets and effects), and
+  // this hook suspends the render once per bar to create only that bar's
+  // voices, so only sounding voices are ever in the graph
+  const startRendering = OfflineAudioContext.prototype.startRendering;
+  OfflineAudioContext.prototype.startRendering = async function () {
+    const plan = window.plan;
+    // other offline renders pass straight through: superdough renders each
+    // reverb's impulse response in an OfflineAudioContext of its own
+    if (!plan) return startRendering.call(this);
+    window.plan = null;
+    const quantum = 128 / this.sampleRate;
+    const lookahead = 0.1; // seconds before each bar that its voices are created
+    await schedule(plan, plan.begin, Math.min(plan.begin + 1, plan.end));
+    for (let bar = plan.begin + 1; bar < plan.end; bar++) {
+      const at = Math.floor(((bar - plan.begin) / plan.cps - lookahead) / quantum) * quantum;
+      this.suspend(at).then(async () => {
+        await schedule(plan, bar, Math.min(bar + 1, plan.end));
+        this.resume();
+      });
+    }
+    // keep the float buffer: the wav renderPatternAudio downloads is 16-bit,
+    // which would clip anything above 0 dBFS
+    window.rendered = await startRendering.call(this);
+    return window.rendered;
+  };
+
+  // render the notes starting in [begin, end) cycles of the evaluated
+  // pattern, plus tail seconds for releases and effects to ring out
+  window.render = async ({ begin, end, cps, tail, rate }) => {
+    window.plan = { pattern: window.pattern, begin, end, cps };
+    await S.renderPatternAudio(S.silence, cps, begin, end + tail * cps, rate, 1024, false, 'chunk');
+    return window.rendered;
+  };
+</script>

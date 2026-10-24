@@ -36,9 +36,12 @@ async function cachedFetch(route) {
   if (!fs.existsSync(file)) {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
+    // pages often ask for the same file at once (every worker loads the same
+    // soundfont): each writes its own temporary file, and the last rename wins
+    const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
     fs.mkdirSync(cacheDir, { recursive: true });
-    fs.writeFileSync(`${file}.tmp`, await response.body());
-    fs.renameSync(`${file}.tmp`, file);
+    fs.writeFileSync(tmp, await response.body());
+    fs.renameSync(tmp, file);
   }
   return route.fulfill({ body: fs.readFileSync(file), headers: { 'access-control-allow-origin': '*' } });
 }
@@ -60,7 +63,7 @@ export async function openPages(count, onConsole) {
     const pages = await Promise.all(
       Array.from({ length: count }, async () => {
         const context = await browser.newContext();
-        await context.route(/^https:\/\/(raw\.githubusercontent\.com|cdn\.freesound\.org)\//, cachedFetch);
+        await context.route(/^https:\/\/(raw\.githubusercontent\.com|cdn\.freesound\.org|felixroos\.github\.io)\//, cachedFetch);
         const page = await context.newPage();
         page.on('console', (msg) => ['error', 'warning'].includes(msg.type()) && onConsole?.(msg.type(), msg.text()));
         page.on('pageerror', (err) => onConsole?.('error', String(err.message ?? err)));

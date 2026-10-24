@@ -134,7 +134,7 @@ async function snapshot() {
       const S = window.S;
       // the sound registry lowercases names: recover the spelling from the sample maps
       const ds = 'https://raw.githubusercontent.com/felixroos/dough-samples/main';
-      const maps = ['tidal-drum-machines', 'piano', 'Dirt-Samples', 'EmuSP12', 'vcsl'];
+      const maps = ['tidal-drum-machines', 'piano', 'Dirt-Samples', 'EmuSP12', 'vcsl', 'mridangam'];
       const source = {};
       for (const map of maps) {
         const list = await (await fetch(`${ds}/${map}.json`)).json();
@@ -146,7 +146,7 @@ async function snapshot() {
           name: source[key]?.name ?? key,
           map: source[key]?.map ?? null,
           type: entry?.data?.type ?? 'unknown',
-          variants: Array.isArray(samples) ? samples.length : samples && typeof samples === 'object' ? Object.keys(samples).length : null,
+          variants: entry?.data?.fonts?.length ?? (Array.isArray(samples) ? samples.length : samples && typeof samples === 'object' ? Object.keys(samples).length : null),
         };
       });
       return { functions: Object.keys(S), methods: Object.getOwnPropertyNames(S.Pattern.prototype), sounds };
@@ -192,6 +192,7 @@ function score(doc, words) {
 function banksOf(sounds) {
   const prefixes = {};
   for (const s of sounds) {
+    if (s.type === 'soundfont') continue; // gm_* is a naming scheme, not a bank
     const i = s.name.indexOf('_');
     if (i > 0) (prefixes[s.name.slice(0, i)] ??= []).push({ ...s, short: s.name.slice(i + 1) });
   }
@@ -272,7 +273,8 @@ if (command === 'functions' || command === 'function') {
   const banks = banksOf(sounds);
   const inBank = new Set(Object.values(banks).flat().map((s) => s.name));
   const synths = sounds.filter((s) => s.type === 'synth');
-  const samples = sounds.filter((s) => s.type !== 'synth' && !inBank.has(s.name));
+  const fonts = sounds.filter((s) => s.type === 'soundfont');
+  const samples = sounds.filter((s) => !['synth', 'soundfont'].includes(s.type) && !inBank.has(s.name));
   const bankLine = (name, list) => `${name}: ${list.map((s) => `${s.short}${variants(s)}`).join(' ')}`;
 
   if (command === 'bank') {
@@ -307,12 +309,14 @@ if (command === 'functions' || command === 'function') {
       `drum machine banks (${Object.keys(banks).length}): use s("bd").bank("<bank>"). list them: banks [query]`,
       `  ${Object.keys(banks).join(' ')}`,
       '',
+      `soundfonts (${fonts.length}), General MIDI instruments played with note(), no .bank(), .n(i) picks the font: ${fonts.map((s) => s.name).join(' ')}`,
+      '',
       'sample sets, used as s("<name>") or s("<name>:n"):',
       ...Object.entries(maps).map(([map, list]) => `  ${map} (${list.length}): ${list.slice(0, 40).map((s) => s.name).join(' ')}${list.length > 40 ? ' ...' : ''}`),
       '',
       'search: sounds <query>',
     ];
-    out({ synths: synths.map((s) => s.name), banks: Object.keys(banks), samples: maps }, lines.join('\n'));
+    out({ synths: synths.map((s) => s.name), soundfonts: fonts.map((s) => s.name), banks: Object.keys(banks), samples: maps }, lines.join('\n'));
   } else {
     const q = query.toLowerCase();
     const hitSynths = synths.filter((s) => s.name.toLowerCase().includes(q));
@@ -320,12 +324,14 @@ if (command === 'functions' || command === 'function') {
       .map(([name, list]) => [name, list.filter((s) => s.short.toLowerCase().includes(q) || name.toLowerCase().includes(q))])
       .filter(([, list]) => list.length);
     const hitSamples = samples.filter((s) => s.name.toLowerCase().includes(q));
+    const hitFonts = fonts.filter((s) => s.name.toLowerCase().includes(q));
     const lines = [];
     if (hitSynths.length) lines.push(`synths (no .bank()): ${hitSynths.map((s) => s.name).join(' ')}`, '');
+    if (hitFonts.length) lines.push(`soundfonts, as note(...).s("<name>"), no .bank(): ${hitFonts.map((s) => `${s.name}${variants(s)}`).join(' ')}`, '');
     if (hitBanks.length) lines.push(`in ${hitBanks.length} banks, as s("<sound>").bank("<bank>"):`, ...hitBanks.slice(0, 30).map(([n, list]) => `  ${bankLine(n, list)}`), ...(hitBanks.length > 30 ? [`  ... ${hitBanks.length - 30} more`] : []), '');
     if (hitSamples.length) lines.push('samples, as s("<name>"):', ...hitSamples.slice(0, 40).map((s) => `  ${s.name}${variants(s)}  [${s.map ?? s.type}]`), ...(hitSamples.length > 40 ? [`  ... ${hitSamples.length - 40} more`] : []));
     if (!lines.length) lines.push(`no sound matches "${query}"`);
-    out({ synths: hitSynths, banks: Object.fromEntries(hitBanks.map(([n, l]) => [n, l.map((s) => ({ name: s.short, variants: s.variants }))])), samples: hitSamples }, lines.join('\n'));
+    out({ synths: hitSynths, soundfonts: hitFonts, banks: Object.fromEntries(hitBanks.map(([n, l]) => [n, l.map((s) => ({ name: s.short, variants: s.variants }))])), samples: hitSamples }, lines.join('\n'));
   }
 } else {
   console.error(USAGE);

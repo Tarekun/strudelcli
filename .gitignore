@@ -1,3 +1,6 @@
 strudel-remote
 .strudel-remote
 .strudel-remote.log
+
+node_modules
+.venv

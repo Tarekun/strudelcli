@@ -1,8 +1,20 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>strudel offline render</title>
+<!-- the soundfont loader imports superdough's helpers from the strudel
+     packages, which @strudel/web bundles: point it at the same bundle, so the
+     gm_* sounds register in the soundMap the page plays from -->
+<script type="importmap">
+  {
+    "imports": {
+      "@strudel/core": "/node_modules/@strudel/web/dist/index.mjs",
+      "@strudel/webaudio": "/node_modules/@strudel/web/dist/index.mjs"
+    }
+  }
+</script>
 <script type="module">
   import * as S from '/node_modules/@strudel/web/dist/index.mjs';
+  import { registerSoundfonts } from '/node_modules/@strudel/soundfonts/fontloader.mjs';
 
   window.S = S;
 
@@ -16,12 +28,24 @@
     return target instanceof AudioNode && target.context !== S.getAudioContext() ? undefined : target;
   };
 
-  // same sample maps the VSCode extension (cmillsdev.strudelvs) prebakes
+  // the soundfont loader decodes with a success callback only, so a zone that
+  // won't decode (gm_vibraphone has an empty one above C6) leaves its note
+  // waiting forever, and an offline render with it. hand it null instead: the
+  // loader then throws for that note, which is skipped, as it is in the extension
+  const decode = BaseAudioContext.prototype.decodeAudioData;
+  BaseAudioContext.prototype.decodeAudioData = function (data, onSuccess, onError) {
+    const decoded = decode.call(this, data);
+    if (!onSuccess && !onError) return decoded;
+    decoded.then(onSuccess, (err) => (onError ? onError(err) : onSuccess(null)));
+    return decoded.catch(() => null);
+  };
+
+  // same sample maps and soundfonts the VSCode extension (cmillsdev.strudelvs) prebakes
   const ds = 'https://raw.githubusercontent.com/felixroos/dough-samples/main';
-  const maps = ['tidal-drum-machines', 'piano', 'Dirt-Samples', 'EmuSP12', 'vcsl'];
+  const maps = ['tidal-drum-machines', 'piano', 'Dirt-Samples', 'EmuSP12', 'vcsl', 'mridangam'];
 
   window.ready = S.initStrudel({
-    prebake: () => Promise.all(maps.map((m) => S.samples(`${ds}/${m}.json`))),
+    prebake: () => Promise.all([registerSoundfonts(), ...maps.map((m) => S.samples(`${ds}/${m}.json`))]),
   }).then((repl) => (window.repl = repl));
 
   // superdough voices for the notes starting in [from, to) cycles
@@ -34,7 +58,10 @@
       const t = (hap.whole.begin.valueOf() - begin) / cps;
       try {
         hap.ensureObjectValue(); // throws for plain values with no .s() or .note()
-        await S.superdough(hap.value, t, hap.duration / cps, cps, t);
+        // the render is suspended until every voice of the bar is created: a
+        // voice that never finishes loading would stall it for good
+        const stuck = new Promise((_, reject) => setTimeout(() => reject(new Error(`a ${hap.value.s} voice took over 20 s to load: skipped`)), 20000));
+        await Promise.race([S.superdough(hap.value, t, hap.duration / cps, cps, t), stuck]);
       } catch (err) {
         console.error(String(err?.message ?? err));
       }

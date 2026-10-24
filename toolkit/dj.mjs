@@ -1,11 +1,13 @@
-// deck for live dj sets: plays one section at a time through the strudel-remote
-// extension and swaps in the next section on time, so whoever writes the
-// sections (an agent, a slow local model) only has to be done before the
-// current one ends
+// deck for live dj sets: renders every queued section to audio ahead of time
+// and plays the set through PipeWire (pw-cat), so whoever writes the sections
+// (an agent, a slow local model) only has to be done a few minutes before the
+// current one ends. playback only streams finished audio, so it needs no VSCode,
+// and rendering or validating in the background can't make it crackle
 //
-//   node dj.mjs start  <set-dir> <section.strudel.js> [--minutes 5]
+//   node dj.mjs start  <set-dir> <section.strudel.js> [--minutes 5] [--target <sink>]
 //   node dj.mjs check  <set-dir> <section.strudel.js>
 //   node dj.mjs queue  <set-dir> <section.strudel.js> [--force] [--replace]
+//   node dj.mjs now    <set-dir> [<section.strudel.js>]
 //   node dj.mjs unqueue <set-dir> [n]
 //   node dj.mjs skip   <set-dir>
 //   node dj.mjs status <set-dir> [--json]
@@ -14,45 +16,58 @@
 //
 // <set-dir> is live/<name>/ by convention
 //
-// start  checks the first section, copies it to <set-dir>/live.strudel.js and
-//        plays it from bar 0 (stops whatever plays)
+// start  checks the first section, renders it and plays it from bar 0 (stops
+//        a set already playing from that directory). returns right away: the
+//        music starts once the render is done, usually within a minute or two.
+//        --target picks the PipeWire sink (pw-cat --target), default the system's
 // check  the quick gate a section must pass: validate (parses, has events,
 //        sounds exist, makes audio), same tempo as the set, and an 8-bar render
 //        of its busiest part measured against the sections played before.
 //        exit 1 = it would sound broken or jump in level
-// queue  check, then add it to the end of the queue: each queued section swaps
-//        in when the one before it ends. a background process does the swaps,
-//        the caller can go away. late? it swaps at the next 16-bar phrase.
+// queue  check, then add it to the end of the queue and render it in the
+//        background: each queued section swaps in when the one before it ends.
+//        one that isn't rendered by then swaps in on a later 16-bar phrase, and
+//        the current section plays from its top again meanwhile.
 //        --replace empties the queue first
+// now    re-render the current section from its next 16-bar phrase on, from its
+//        edited file (or another one), and swap that in on the first phrase
+//        after it's rendered: for changes the user wants to hear right away.
+//        it lasts until the section ends; if it loops, it loops as queued
 // unqueue remove the n-th queued section (1 = next up), default the last one
 // skip   cut the current section short: the next queued one swaps in on the
 //        next 16-bar phrase instead of at the end
-// status what plays, where in it, what's queued, and when to wake up next:
-//        now while fewer than 2 sections are queued, else just after the next swap
+// status what plays, where in it, what's queued and rendered, and when to wake
+//        up next: now while fewer than 2 sections are queued, else just after
+//        the next swap
 // wait   block until the next queued section has swapped in (exit 3 after --max
 //        seconds, default 540, so it fits a tool timeout: just call it again)
 //
-// timing: 1 cycle = 1 bar, and the set's clock starts at the extension's
-// strudel.play. each section's arrange is shifted with .late(<start bar>) in the
-// live file, so it starts from its own bar 0 whenever it's swapped in. every
-// section keeps the set's tempo: a different setcps breaks the bar math
+// timing: 1 cycle = 1 bar. a background player (_play) streams the set to
+// pw-cat and swaps sections on exact bar boundaries, counted in samples, so
+// every section starts from its own bar 0. every section keeps the set's tempo:
+// a different setcps breaks the bar math. renders (_render) and the checks run
+// at the lowest cpu priority, the player at normal priority
 //
-// state lives in <set-dir>/dj.json, swap history in <set-dir>/dj.log, queued
-// sections are snapshotted to <set-dir>/.queue/ when queued
+// files in <set-dir>: dj.json (settings and queue, written by the commands),
+// deck.json (what plays, written by the player), dj.log (swaps and errors),
+// .queue/<id>/ (each section's snapshot and render, deleted once played)
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArrange } from './arrange.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.dirname(here); // the vscode workspace: .strudel-remote and its log live here
-const REMOTE = path.join(root, '.strudel-remote');
-const REMOTE_LOG = path.join(root, '.strudel-remote.log');
+const root = path.dirname(here);
 const AHEAD = 2; // sections to keep queued: a late wake-up then still has a whole section of slack
-const PHRASE = 16; // bars: a late section swaps in on the next phrase of the current one
-const MARGIN = 3000; // ms: a swap needs at least this much notice
+const PHRASE = 16; // bars: late sections, skips and `now` swap in on a phrase of the current one
+const MARGIN = 3000; // ms: a skip needs at least this much notice
+const RATE = 44100;
+const BLOCK = 4096; // frames the player writes at a time
+const FADE = 0.05; // s: what's cut off mid-section fades out under what comes in
+const RENDER_WORKERS = Math.max(2, Math.floor(os.availableParallelism() / 2));
 const LEVEL_WARN = 3; // LU from the set's median: noticeable jump
 const LEVEL_FAIL = 6; // LU: the crowd reaches for the volume knob
 const SILENT_LUFS = -45;
@@ -65,101 +80,170 @@ const clock = (ms) => {
 const round = (x) => Math.round(x * 10) / 10;
 
 function parseArgs(argv) {
-  const opts = { minutes: 5, force: false, replace: false, json: false, max: 540 };
+  const opts = { minutes: 5, force: false, replace: false, json: false, max: 540, target: null };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (['--force', '--replace', '--json'].includes(argv[i])) opts[argv[i].slice(2)] = true;
     else if (argv[i] === '--minutes' || argv[i] === '--max') opts[argv[i].slice(2)] = Number(argv[++i]);
+    else if (argv[i] === '--target') opts.target = argv[++i];
     else rest.push(argv[i]);
   }
   const [command, set, file] = rest;
   const needsFile = ['start', 'check', 'queue'].includes(command);
-  const known = needsFile || ['unqueue', 'skip', 'status', 'wait', 'stop', '_deck'].includes(command);
+  const takesFile = needsFile || command === 'now';
+  const known = takesFile || ['unqueue', 'skip', 'status', 'wait', 'stop', '_play', '_render'].includes(command);
   if (!known || !set || (needsFile && !file)) {
-    console.error('usage: node dj.mjs start|check|queue <set-dir> <section.strudel.js> | unqueue|skip|status|wait|stop <set-dir>   (see the header)');
+    console.error('usage: node dj.mjs start|check|queue <set-dir> <section.strudel.js> | now <set-dir> [file] | unqueue|skip|status|wait|stop <set-dir>   (see the header)');
     process.exit(2);
   }
-  if (needsFile && !fs.existsSync(file)) {
+  if (takesFile && file && !fs.existsSync(file)) {
     console.error(`no such file: ${file}`);
     process.exit(2);
   }
-  return { ...opts, command, set: path.resolve(set), file: needsFile ? path.resolve(file) : null, n: needsFile ? null : file };
+  return { ...opts, command, set: path.resolve(set), file: takesFile && file ? path.resolve(file) : null, n: takesFile ? null : file };
 }
 
 // ---------------------------------------------------------------- state
 
+// each file has one writer, so the player and the commands never overwrite
+// each other's changes. writes go through a rename, so readers never see half a file
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+function writeJson(file, value) {
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(value, null, 2) + '\n');
+  fs.renameSync(`${file}.tmp`, file);
+}
 const stateFile = (set) => path.join(set, 'dj.json');
-const readState = (set) => (fs.existsSync(stateFile(set)) ? JSON.parse(fs.readFileSync(stateFile(set), 'utf8')) : null);
-const writeState = (set, state) => fs.writeFileSync(stateFile(set), JSON.stringify(state, null, 2) + '\n');
-const logSwap = (set, line) => fs.appendFileSync(path.join(set, 'dj.log'), `${new Date().toISOString()} ${line}\n`);
+const deckFile = (set) => path.join(set, 'deck.json');
+const readState = (set) => readJson(stateFile(set));
+const writeState = (set, state) => writeJson(stateFile(set), state);
+const readDeck = (set) => readJson(deckFile(set));
+const logLine = (set, line) => fs.appendFileSync(path.join(set, 'dj.log'), `${new Date().toISOString()} ${line}\n`);
 
 function requireState(set) {
   const state = readState(set);
   if (!state) {
-    console.error(`no set running in ${set}: node dj.mjs start <set-dir> <first section>`);
+    console.error(`no set in ${set}: node dj.mjs start <set-dir> <first section>`);
+    process.exit(2);
+  }
+  if (state.live) {
+    console.error(`${set} was played by the old VSCode deck: run start again to play it with this one`);
     process.exit(2);
   }
   return state;
 }
 
+const alive = (pid) => {
+  try {
+    return pid && process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+};
+const kill = (pid) => {
+  try {
+    if (pid) process.kill(pid);
+  } catch {}
+};
+// renders run detached in their own process group: this stops render.mjs and its chromium too
+const killGroup = (pid) => {
+  try {
+    if (pid) process.kill(-pid);
+  } catch {}
+};
+
+// the queue minus what the player has played already
+const pending = (state, deck) => state.queue.filter((q) => !deck?.played.includes(q.id));
+
+// ---------------------------------------------------------------- timing
+
 const barMs = (state) => 240000 / state.bpm;
-const barAt = (state, ms) => (ms - state.t0) / barMs(state);
-const timeOf = (state, bar) => state.t0 + bar * barMs(state);
+// the player's t0 is when it wrote the set's first sample: close enough to when
+// it was heard for planning, the swaps themselves are counted in samples
+const barAt = (state, deck, ms) => (ms - deck.t0) / barMs(state);
+const timeOf = (state, deck, bar) => deck.t0 + bar * barMs(state);
 
 // the first phrase of the current section that's still far enough away
-function nextPhrase(state, now = Date.now()) {
-  const since = barAt(state, now + MARGIN) - state.current.start;
-  return state.current.start + Math.max(1, Math.ceil(since / PHRASE)) * PHRASE;
+function nextPhrase(state, deck, now = Date.now()) {
+  const since = barAt(state, deck, now + MARGIN) - deck.current.start;
+  return deck.current.start + Math.max(1, Math.ceil(since / PHRASE)) * PHRASE;
 }
 
-// the bar the next section starts at: when the current one ends, or, when that
-// has passed already, the next phrase of the current one
-function nextStart(state, now = Date.now()) {
-  const end = state.current.start + state.current.bars;
-  return timeOf(state, end) - now > MARGIN ? end : nextPhrase(state, now);
-}
-
-// the queue with the bar each section will start at: the first one's is fixed
-// once the deck picks it up, the rest follow on from each other
-function schedule(state, now = Date.now()) {
-  let at = state.queue[0]?.start ?? nextStart(state, now);
-  return state.queue.map((q) => {
+// the queue with the bar each section should start at: the first one when the
+// current section ends (or at the skip), the rest following on. a section that
+// isn't rendered yet when its bar comes swaps in later than this
+function schedule(state, deck, now = Date.now()) {
+  const queue = pending(state, deck);
+  if (!deck?.current) return queue.map((q) => ({ ...q, start: null }));
+  const end = deck.current.start + deck.current.bars;
+  let at = queue[0] && state.skip?.id === queue[0].id ? state.skip.bar : end;
+  if (timeOf(state, deck, at) < now) at = nextPhrase(state, deck, now); // late: it plays from its top again meanwhile
+  return queue.map((q) => {
     const entry = { ...q, start: at };
     at += q.bars;
     return entry;
   });
 }
 
-// ---------------------------------------------------------------- the extension
+// ---------------------------------------------------------------- renders
 
-function remoteLog(since) {
-  if (!fs.existsSync(REMOTE_LOG)) return [];
-  return fs
-    .readFileSync(REMOTE_LOG, 'utf8')
-    .split('\n')
-    .map((line) => ({ at: Date.parse(line.slice(0, 24)), msg: line.slice(25) }))
-    .filter((l) => l.at >= since);
+const renderDir = (set, id) => path.join(set, '.queue', id);
+const audioFile = (dir) => path.join(dir, 'mix.wav');
+
+// 'ready', 'failed: ...', or 'rendering 40%'
+function renderState(entry, state) {
+  const done = readJson(path.join(entry.dir, 'done.json'));
+  if (done?.error) return `failed: ${done.error}`;
+  if (done) return 'ready';
+  let size = 0;
+  try {
+    size = fs.statSync(audioFile(entry.dir)).size;
+  } catch {}
+  const frames = ((entry.bars - (entry.from ?? 0)) * RATE * 240) / state.bpm;
+  return `rendering ${Math.min(99, Math.round((100 * Math.max(0, size - 44)) / 8 / frames))}%`;
+}
+const isReady = (entry) => fs.existsSync(path.join(entry.dir, 'done.json')) && !readJson(path.join(entry.dir, 'done.json'))?.error;
+
+// render a snapshot in the background, at the lowest priority. the job reads
+// what to render from entry.json, since the caller writes dj.json after this
+function spawnRender(set, entry) {
+  fs.mkdirSync(entry.dir, { recursive: true });
+  writeJson(path.join(entry.dir, 'entry.json'), entry);
+  const log = fs.openSync(path.join(entry.dir, 'render.log'), 'a');
+  const child = spawn('nice', ['-n', '19', process.execPath, fileURLToPath(import.meta.url), '_render', set, entry.id], { detached: true, stdio: ['ignore', log, log] });
+  child.unref();
+  entry.render = child.pid;
 }
 
-async function remoteSaw(since, test, ms) {
-  for (let t = 0; t < ms; t += 100) {
-    const hit = remoteLog(since).find((l) => test(l.msg));
-    if (hit) return hit;
-    await sleep(100);
-  }
-  return null;
+function renderJob(opts) {
+  const entry = readJson(path.join(renderDir(opts.set, opts.n), 'entry.json'));
+  if (!entry) return;
+  const started = Date.now();
+  const args = [path.join(here, 'render.mjs'), entry.snapshot, '--out', entry.dir, '--workers', String(RENDER_WORKERS)];
+  if (entry.from) args.push('--from', String(entry.from), '--chunk', '16');
+  const r = spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 });
+  process.stdout.write(r.stdout ?? '');
+  process.stderr.write(r.stderr ?? '');
+  const done = r.status === 0 ? { took: round((Date.now() - started) / 1000) } : { error: (r.stderr || r.stdout || 'render failed').trim().split('\n').slice(-2).join(' ') };
+  writeJson(path.join(entry.dir, 'done.json'), done);
+  if (done.error) logLine(opts.set, `render of ${entry.file} failed: ${done.error}`);
 }
 
-async function remote(command, test, ms = 3000) {
-  const since = Date.now() - 50; // the log's clock and ours are the same machine, but stamps are ms-rounded
-  fs.writeFileSync(REMOTE, command + '\n');
-  return remoteSaw(since, test, ms);
+function dropRender(entry) {
+  killGroup(entry.render);
+  fs.rmSync(entry.dir, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------- the quick gate
 
+// at the lowest priority, so it doesn't slow down anything else on the machine
 function run(args) {
-  const r = spawnSync(args[0], args.slice(1), { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 });
+  const r = spawnSync('nice', ['-n', '19', ...args], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 });
   return { status: r.status, out: r.stdout, err: r.stderr };
 }
 
@@ -175,14 +259,14 @@ const median = (xs) => {
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 };
 
-// { ok, problems, notes, bars, bpm, lufs, peak }
-function check(file, state) {
+// { ok, problems, notes, bars, bpm, lufs, peak }. levels: false skips the level render
+function check(file, state, history = [], { levels = true } = {}) {
   const problems = [];
   const notes = [];
   const result = { ok: false, problems, notes };
   const rel = path.relative(root, file);
 
-  const v = run([process.execPath, path.join(here, 'validate.mjs'), rel, '--bars', '2', '--json']);
+  const v = run([process.execPath, path.join(here, 'validate.mjs'), rel, '--bars', '2', '--workers', '2', '--json']);
   let report;
   try {
     report = JSON.parse(v.out);
@@ -199,16 +283,20 @@ function check(file, state) {
 
   const arrangement = parseArrange(fs.readFileSync(file, 'utf8'));
   if (!arrangement?.sections.length) {
-    problems.push('no arrange(...): the deck needs one to know the section length and to shift it into place');
+    problems.push('no arrange(...): the deck needs one to know the section length');
     return result;
   }
   result.bars = arrangement.sections.reduce((n, s) => n + s.bars, 0);
   if (result.bars % 8) problems.push(`the arrange is ${result.bars} bars: make it a multiple of 8 so the next section lands on a phrase`);
   if (state && Math.abs(result.bpm - state.bpm) > 0.5) problems.push(`tempo is ${result.bpm} bpm, the set runs at ${state.bpm}: use the same setcps`);
-  if (state) {
+  if (state && levels) {
     const target = state.minutes * state.bpm / 4;
     if (result.bars < target) notes.push(`${result.bars} bars is ${clock(result.bars * barMs(state))}, shorter than the set's ${state.minutes} min sections: you'll have less time to write the next one`);
     else if (result.bars > target * 2) notes.push(`${result.bars} bars is ${clock(result.bars * barMs(state))}, over twice the set's ${state.minutes} min sections`);
+  }
+  if (!levels) {
+    result.ok = !problems.length;
+    return result;
   }
 
   // levels: 8 bars of the busiest part, against what the set played so far
@@ -216,7 +304,7 @@ function check(file, state) {
   const out = path.join(here, 'out', 'dj', path.basename(file).replace(/\.strudel\.js$|\.js$/, ''));
   const from = busiest.from;
   const to = Math.min(from + 8, from + busiest.bars);
-  const r = run([process.execPath, path.join(here, 'render.mjs'), rel, '--from', String(from), '--to', String(to), '--tail', '2', '--out', out]);
+  const r = run([process.execPath, path.join(here, 'render.mjs'), rel, '--from', String(from), '--to', String(to), '--tail', '2', '--workers', '1', '--out', out]);
   if (r.status !== 0) {
     problems.push(`render failed: ${r.err.trim().split('\n').slice(-3).join(' ')}`);
     return result;
@@ -225,10 +313,10 @@ function check(file, state) {
   Object.assign(result, { lufs: round(lufs), peak: round(peak), measured: `bars ${from}-${to} (${busiest.parts.length} instruments)` });
   if (!(lufs > SILENT_LUFS)) problems.push(`bars ${from}-${to} measure ${round(lufs)} LUFS: next to silent`);
   if (peak > 0) notes.push(`true peak ${round(peak)} dBTP in bars ${from}-${to}: it may distort, lower the gain of the loudest parts`);
-  const levels = (state?.history ?? []).map((h) => h.lufs).filter(Number.isFinite);
-  if (levels.length && lufs > SILENT_LUFS) {
-    const diff = round(lufs - median(levels));
-    const msg = `${diff > 0 ? '+' : ''}${diff} LU against the set so far (${round(median(levels))} LUFS)`;
+  const played = history.map((h) => h.lufs).filter(Number.isFinite);
+  if (played.length && lufs > SILENT_LUFS) {
+    const diff = round(lufs - median(played));
+    const msg = `${diff > 0 ? '+' : ''}${diff} LU against the set so far (${round(median(played))} LUFS)`;
     if (Math.abs(diff) > LEVEL_FAIL) problems.push(`${msg}: bring the gains ${diff > 0 ? 'down' : 'up'}`);
     else if (Math.abs(diff) > LEVEL_WARN) notes.push(msg);
   }
@@ -242,100 +330,289 @@ function printCheck(file, c) {
   for (const n of c.notes) console.log(`  warning: ${n}`);
 }
 
-// ---------------------------------------------------------------- the live file
+// snapshot a section, so editing its file afterwards doesn't change what plays unchecked
+function entryFor(set, file, c, extra = {}) {
+  const id = `${Date.now()}`;
+  const dir = renderDir(set, id);
+  fs.mkdirSync(dir, { recursive: true });
+  const snapshot = path.join(dir, 'section.js'); // not *.strudel.js, so the VSCode extension doesn't react to it
+  fs.copyFileSync(file, snapshot);
+  return { id, file: path.relative(root, file), snapshot, dir, bars: c.bars, lufs: c.lufs, ...extra };
+}
 
-const liveFile = (set) => path.join(set, 'live.strudel.js');
+// ---------------------------------------------------------------- the player
 
-// the section, its arrange shifted so it starts at bar `start` of the set
-function shifted(file, start, code = fs.readFileSync(file, 'utf8')) {
-  const { end } = parseArrange(code);
-  const header = `// live: ${path.basename(file)} from bar ${start} of the set, written by toolkit/dj.mjs\n`;
-  return header + (start ? `${code.slice(0, end)}.late(${start})${code.slice(end)}` : code);
+// streams the set to pw-cat: the queued sections one after another, each from
+// its own render, swapped on exact bar boundaries
+async function play(opts) {
+  const set = opts.set;
+  // start registers this process's pid right after spawning it
+  for (let i = 0; i < 30 && readState(set)?.player !== process.pid; i++) await sleep(100);
+  let state = readState(set);
+  if (state?.player !== process.pid) return;
+  const barFrames = (RATE * 240) / state.bpm;
+  const frameOf = (bar) => Math.round(bar * barFrames);
+  const deck = { pid: process.pid, t0: null, frame: 0, current: null, played: [], history: [] };
+  const save = () => writeJson(deckFile(set), deck);
+
+  // the first section has to be rendered before anything plays
+  for (;;) {
+    state = readState(set) ?? state;
+    if (state.player !== process.pid) return;
+    const first = pending(state, deck)[0];
+    if (first && isReady(first)) break;
+    if (first && renderState(first, state).startsWith('failed')) {
+      logLine(set, `the first section didn't render: ${renderState(first, state)}`);
+      return;
+    }
+    await sleep(500);
+  }
+
+  // open renders, by directory: [fd, frames]
+  const files = new Map();
+  const open = (dir) => {
+    if (!files.has(dir)) {
+      const fd = fs.openSync(audioFile(dir), 'r');
+      files.set(dir, [fd, (fs.fstatSync(fd).size - 44) / 8]);
+    }
+    return files.get(dir);
+  };
+  const close = (dir) => {
+    if (files.has(dir)) fs.closeSync(files.get(dir)[0]);
+    files.delete(dir);
+  };
+  // the take's audio for set frames [frame, frame + n), as interleaved stereo
+  const read = (take, start, frame, n) => {
+    const out = new Float32Array(n * 2);
+    const [fd, frames] = open(take.dir);
+    const at = frame - frameOf(start + take.from);
+    const from = Math.max(0, at);
+    const to = Math.min(frames, at + n);
+    if (to > from) {
+      const bytes = Buffer.alloc((to - from) * 8);
+      fs.readSync(fd, bytes, 0, bytes.length, 44 + from * 8);
+      out.set(new Float32Array(bytes.buffer, bytes.byteOffset, (to - from) * 2), (from - at) * 2);
+    }
+    return out;
+  };
+
+  // audio that spills over into what comes next: release and reverb tails at a
+  // section's end, a short fade when a section is cut off
+  let carry = new Float32Array(0);
+  let carryAt = 0;
+  const addCarry = (frame, samples) => {
+    if (!carry.length) carryAt = frame;
+    const start = Math.min(carryAt, frame);
+    const end = Math.max(carryAt + carry.length / 2, frame + samples.length / 2);
+    const merged = new Float32Array((end - start) * 2);
+    merged.set(carry, (carryAt - start) * 2);
+    for (let i = 0; i < samples.length; i++) merged[(frame - start) * 2 + i] += samples[i];
+    carry = merged;
+    carryAt = start;
+  };
+  const tailOf = (cur, frame) => {
+    const [, frames] = open(cur.take.dir);
+    const left = frames - (frame - frameOf(cur.start + cur.take.from));
+    return left > 0 ? read(cur.take, cur.start, frame, left) : new Float32Array(0);
+  };
+  const fadeOf = (cur, frame) => {
+    const n = Math.round(FADE * RATE);
+    const audio = read(cur.take, cur.start, frame, n);
+    for (let i = 0; i < n; i++) {
+      audio[2 * i] *= 1 - i / n;
+      audio[2 * i + 1] *= 1 - i / n;
+    }
+    return audio;
+  };
+
+  const sectionOf = (entry, start) => ({ id: entry.id, file: entry.file, start, bars: entry.bars, lufs: entry.lufs, base: { dir: entry.dir, from: 0 }, take: { dir: entry.dir, from: 0 } });
+  const retire = (cur) => {
+    for (const dir of new Set([cur.base.dir, cur.take.dir])) {
+      close(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const swapIn = (entry, bar, how) => {
+    const prev = deck.current;
+    deck.current = sectionOf(entry, bar);
+    deck.played.push(entry.id);
+    deck.history.push({ file: entry.file, start: bar, bars: entry.bars, lufs: entry.lufs, at: new Date().toISOString() });
+    if (prev) retire(prev);
+    logLine(set, `${how} ${entry.file} at bar ${bar}`);
+  };
+
+  let late = false; // the current section has ended or been skipped, and what's next isn't rendered yet
+  // runs on every bar line of the set, before that bar is written
+  const decide = (bar) => {
+    const cur = deck.current;
+    const frame = frameOf(bar);
+    const local = bar - cur.start;
+    const ended = local >= cur.bars;
+    const now = state.now;
+    if (!ended && now?.of === cur.id && !deck.played.includes(now.id) && local >= now.from && local % PHRASE === 0 && isReady(now)) {
+      addCarry(frame, fadeOf(cur, frame));
+      if (cur.take.dir !== cur.base.dir) close(cur.take.dir);
+      cur.take = { dir: now.dir, from: now.from };
+      deck.played.push(now.id);
+      logLine(set, `now: ${now.file} from bar ${local} of the section`);
+      return save();
+    }
+    const head = pending(state, deck)[0];
+    if (ended || (head && state.skip?.id === head.id && bar >= state.skip.bar)) late = true;
+    if (!late) return;
+    if (head && isReady(head) && (ended || local % PHRASE === 0)) {
+      addCarry(frame, ended ? tailOf(cur, frame) : fadeOf(cur, frame));
+      swapIn(head, bar, ended ? 'swap' : 'cut to');
+      late = false;
+      return save();
+    }
+    if (ended) {
+      // nothing ready: the section plays from its top again, as queued
+      addCarry(frame, tailOf(cur, frame));
+      if (cur.take.dir !== cur.base.dir) close(cur.take.dir);
+      cur.start = bar;
+      cur.take = cur.base;
+      logLine(set, `loop ${cur.file} at bar ${bar}: ${head ? `${head.file} is ${renderState(head, state)}` : 'nothing queued'}`);
+      save();
+    }
+  };
+
+  const first = pending(state, deck)[0];
+  swapIn(first, 0, 'start');
+  // its own application name, so the mixer remembers a volume for the dj and not for every pw-cat
+  const props = `{ application.name = "strudel-dj" media.name = "${path.basename(set)}" }`;
+  const args = ['--playback', '--format', 'f32', '--rate', String(RATE), '--channels', '2', '--media-role', 'Music', '-P', props];
+  const out = spawn('pw-cat', [...args, ...(state.target ? ['--target', state.target] : []), '-'], { stdio: ['pipe', 'ignore', 'pipe'] });
+  let failed = null;
+  out.stdin.on('error', (err) => (failed ??= err.message));
+  out.stderr.on('data', (d) => logLine(set, `pw-cat: ${String(d).trim()}`));
+  out.on('exit', (code) => (failed ??= `pw-cat exited with ${code}`));
+
+  let decided = -1;
+  let saved = 0;
+  for (;;) {
+    state = readState(set) ?? state;
+    if (state.player !== process.pid) break; // stopped, or the set was restarted
+    if (failed) {
+      logLine(set, `playback failed: ${failed}`);
+      break;
+    }
+    const block = new Float32Array(BLOCK * 2);
+    for (let i = 0; i < BLOCK; ) {
+      const frame = deck.frame + i;
+      let bar = Math.floor(frame / barFrames);
+      while (frameOf(bar) > frame) bar--;
+      while (frameOf(bar + 1) <= frame) bar++;
+      if (frameOf(bar) === frame && bar !== decided) {
+        decided = bar;
+        decide(bar);
+      }
+      const n = Math.min(BLOCK - i, frameOf(bar + 1) - frame);
+      block.set(read(deck.current.take, deck.current.start, frame, n), i * 2);
+      i += n;
+    }
+    if (carry.length) {
+      const n = Math.min(BLOCK - (carryAt - deck.frame), carry.length / 2);
+      for (let i = 0; i < n * 2; i++) block[(carryAt - deck.frame) * 2 + i] += carry[i];
+      carry = carry.subarray(n * 2);
+      carryAt += n;
+    }
+    deck.t0 ??= Date.now();
+    deck.frame += BLOCK;
+    if (!out.stdin.write(Buffer.from(block.buffer))) await new Promise((r) => out.stdin.once('drain', r));
+    if (Date.now() - saved > 1000) {
+      saved = Date.now();
+      save();
+    }
+  }
+  out.stdin.end();
+  kill(out.pid);
+  for (const dir of files.keys()) close(dir);
 }
 
 // ---------------------------------------------------------------- commands
+
+function stopEverything(set, state) {
+  kill(state.player);
+  kill(state.deck); // the old VSCode deck
+  for (const q of [...state.queue, ...(state.now ? [state.now] : [])]) killGroup(q.render);
+  fs.rmSync(path.join(set, '.queue'), { recursive: true, force: true });
+}
 
 async function start(opts) {
   const c = check(opts.file, null);
   printCheck(opts.file, c);
   if (!c.ok) process.exit(1);
-  const old = readState(opts.set);
-  if (old?.deck) kill(old.deck);
-
   fs.mkdirSync(opts.set, { recursive: true });
-  const live = liveFile(opts.set);
-  const rel = path.relative(root, live);
-  fs.writeFileSync(live, shifted(opts.file, 0));
-  await remote('stop', (m) => m.startsWith('strudel.stop'), 2000);
-  await sleep(300);
-  const played = await remote(`play ${rel}`, (m) => m.startsWith('strudel.play'), 6000);
-  if (!played) {
-    console.error('the extension never logged strudel.play: is VSCode open on this folder with Strudel and strudel-remote enabled?');
-    process.exit(2);
-  }
-  const entry = { file: path.relative(root, opts.file), start: 0, bars: c.bars, lufs: c.lufs, at: new Date(played.at).toISOString() };
-  writeState(opts.set, { bpm: c.bpm, minutes: opts.minutes, t0: played.at, lead: 0.5, live: rel, current: entry, queue: [], deck: null, history: [entry] });
-  logSwap(opts.set, `start ${entry.file} (${c.bars} bars at ${c.bpm} bpm)`);
-  console.log(`playing ${rel} from bar 0; it ends in ${clock(c.bars * 240000 / c.bpm)}`);
-}
+  const old = readState(opts.set);
+  if (old) stopEverything(opts.set, old);
+  fs.rmSync(deckFile(opts.set), { force: true });
 
-function kill(pid) {
-  try {
-    process.kill(pid);
-  } catch {}
-}
-
-const alive = (pid) => {
-  try {
-    return pid && process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-};
-
-// state from before the queue existed had a single `queued`
-function upgrade(state) {
-  state.queue ??= [];
-  delete state.queued;
-  return state;
-}
-
-// make sure the background deck runs while anything is queued
-function ensureDeck(set, state) {
-  if (alive(state.deck)) return;
-  const log = () => fs.openSync(path.join(set, 'dj.log'), 'a');
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '_deck', set], { detached: true, stdio: ['ignore', log(), log()] });
-  child.unref();
-  state.deck = child.pid;
+  const entry = entryFor(opts.set, opts.file, c);
+  const state = { bpm: c.bpm, minutes: opts.minutes, target: opts.target, queue: [entry], skip: null, now: null, player: null };
+  spawnRender(opts.set, entry);
+  const log = fs.openSync(path.join(opts.set, 'dj.log'), 'a');
+  const player = spawn(process.execPath, [fileURLToPath(import.meta.url), '_play', opts.set], { detached: true, stdio: ['ignore', log, log] });
+  player.unref();
+  state.player = player.pid;
+  writeState(opts.set, state);
+  logLine(opts.set, `start ${entry.file} (${c.bars} bars at ${c.bpm} bpm)`);
+  console.log(`rendering ${entry.file} (${clock(c.bars * barMs(state))} of audio): it starts playing when that's done, usually within a minute or two. status shows when`);
 }
 
 function queue(opts) {
-  const state = upgrade(requireState(opts.set));
-  const c = check(opts.file, state);
+  const state = requireState(opts.set);
+  const deck = readDeck(opts.set);
+  const c = check(opts.file, state, deck?.history);
   printCheck(opts.file, c);
   if (!c.ok && !opts.force) process.exit(1);
+  state.queue = pending(state, deck); // forget what's been played
   if (opts.replace) {
-    for (const q of state.queue) fs.rmSync(q.snapshot, { force: true });
+    for (const q of state.queue) dropRender(q);
     state.queue = [];
+    state.skip = null;
   }
-
-  // snapshot it, so editing the file afterwards doesn't change what plays unchecked
-  const id = `${Date.now()}`;
-  const snapshot = path.join(opts.set, '.queue', `${id}.js`); // not *.strudel.js, so the extension doesn't react to it
-  fs.mkdirSync(path.dirname(snapshot), { recursive: true });
-  fs.copyFileSync(opts.file, snapshot);
-  state.queue.push({ id, file: path.relative(root, opts.file), snapshot, bars: c.bars, lufs: c.lufs });
-  ensureDeck(opts.set, state);
+  const entry = entryFor(opts.set, opts.file, c);
+  spawnRender(opts.set, entry);
+  state.queue.push(entry);
   writeState(opts.set, state);
 
-  const planned = schedule(state);
-  const me = planned.at(-1);
-  const late = planned.length === 1 && me.start !== state.current.start + state.current.bars;
-  console.log(`queued #${planned.length}: swaps in at bar ${me.start}, in ${clock(timeOf(state, me.start) - Date.now())}${late ? ' (too late for its end: the current section plays from its top again until the next phrase)' : ''}`);
+  const me = schedule(state, deck).at(-1);
+  if (me.start === null) return console.log(`queued #${state.queue.length}: rendering; the set hasn't started playing yet`);
+  console.log(`queued #${state.queue.length}: rendering now, swaps in at bar ${me.start}, in ${clock(timeOf(state, deck, me.start) - Date.now())}`);
+  if (!alive(state.player)) console.log('warning: the player isn\'t running: start the set again');
+}
+
+function now(opts) {
+  const state = requireState(opts.set);
+  const deck = readDeck(opts.set);
+  if (!deck?.current) {
+    console.error('nothing is playing yet');
+    process.exit(1);
+  }
+  const file = opts.file ?? path.join(root, deck.current.file);
+  const c = check(file, state, [], { levels: false });
+  printCheck(file, c);
+  if (!c.ok && !opts.force) process.exit(1);
+  if (c.bars !== deck.current.bars) {
+    console.error(`it's ${c.bars} bars and the playing section is ${deck.current.bars}: keep the length for now, or queue it instead`);
+    process.exit(1);
+  }
+  const from = nextPhrase(state, deck) - deck.current.start;
+  if (from >= deck.current.bars) {
+    console.error('the section ends before its next phrase: queue the change with the next section instead');
+    process.exit(1);
+  }
+  if (state.now) dropRender(state.now);
+  state.now = entryFor(opts.set, file, c, { of: deck.current.id, from });
+  spawnRender(opts.set, state.now);
+  writeState(opts.set, state);
+  console.log(`rendering ${path.relative(root, file)} from bar ${from} of the section: it swaps in on the first 16-bar phrase after the render is done (status shows it)`);
 }
 
 function unqueue(opts) {
-  const state = upgrade(requireState(opts.set));
+  const state = requireState(opts.set);
+  state.queue = pending(state, readDeck(opts.set));
   if (!state.queue.length) return console.log('nothing queued');
   const n = opts.n === null || opts.n === undefined ? state.queue.length : Number(opts.n);
   if (!(n >= 1 && n <= state.queue.length)) {
@@ -343,146 +620,113 @@ function unqueue(opts) {
     process.exit(2);
   }
   const [gone] = state.queue.splice(n - 1, 1);
-  fs.rmSync(gone.snapshot, { force: true });
-  // the next section up now starts where the removed one would have
-  if (n === 1 && state.queue.length) state.queue[0].start = gone.start;
+  dropRender(gone);
+  if (state.skip?.id === gone.id) state.skip = state.queue[0] ? { ...state.skip, id: state.queue[0].id } : null;
   writeState(opts.set, state);
   console.log(`removed #${n} ${gone.file}, ${state.queue.length} left`);
 }
 
 function skip(opts) {
-  const state = upgrade(requireState(opts.set));
-  if (!state.queue.length) {
+  const state = requireState(opts.set);
+  const deck = readDeck(opts.set);
+  const head = schedule(state, deck)[0];
+  if (!head || !deck?.current) {
     console.error('nothing queued to skip to: queue a section first');
     process.exit(1);
   }
-  const at = nextPhrase(state);
-  const head = schedule(state)[0];
-  if (at >= head.start) return console.log(`the next section already swaps in at bar ${head.start}, in ${clock(timeOf(state, head.start) - Date.now())}`);
-  state.queue[0].start = at;
+  const at = nextPhrase(state, deck);
+  if (at >= head.start) return console.log(`the next section already swaps in at bar ${head.start}, in ${clock(timeOf(state, deck, head.start) - Date.now())}`);
+  state.skip = { id: head.id, bar: at };
   writeState(opts.set, state);
-  logSwap(opts.set, `skip: ${head.file} moved to bar ${at}`);
-  console.log(`skipping: ${head.file} swaps in at bar ${at}, in ${clock(timeOf(state, at) - Date.now())}`);
-}
-
-// the background deck: swaps the queued sections in, one after another, then exits
-async function deck(opts) {
-  // queue registers this process's pid right after spawning it
-  for (let i = 0; i < 30 && readState(opts.set)?.deck !== process.pid; i++) await sleep(100);
-  for (;;) {
-    let state = upgrade(readState(opts.set));
-    if (state.deck !== process.pid) return; // replaced, or the set was restarted
-    const head = state.queue[0];
-    if (!head) {
-      state.deck = null;
-      return writeState(opts.set, state);
-    }
-    if (head.start === undefined) {
-      head.start = nextStart(state);
-      writeState(opts.set, state);
-    }
-    const left = timeOf(state, head.start) - state.lead * 1000 - Date.now();
-    if (left > 0) {
-      await sleep(Math.min(left, 1000)); // short naps, to notice skips and unqueues
-      continue;
-    }
-    const live = path.join(root, state.live);
-    const wrote = Date.now();
-    fs.writeFileSync(live, shifted(head.file, head.start, fs.readFileSync(head.snapshot, 'utf8')));
-
-    // the extension updates on its own when live.strudel.js is the active editor;
-    // when the user is looking at another file it skips, so ask it explicitly
-    const name = path.basename(live);
-    let hit = await remoteSaw(wrote, (m) => m === 'strudel.update ' || m === 'strudel.update' || m.startsWith(`skip ${name}`), 2500);
-    if (hit?.msg.startsWith('skip')) hit = await remote(`update ${state.live}`, (m) => m.startsWith('strudel.update'), 2500);
-    const updated = hit?.msg.startsWith('strudel.update');
-
-    state = upgrade(readState(opts.set)); // a queue command may have run meanwhile
-    const offset = updated ? round((hit.at - timeOf(state, head.start)) / 1000) : null;
-    if (updated && hit.msg.trim() === 'strudel.update') state.lead = Math.min(2, Math.max(0.1, round((hit.at - wrote) / 1000 + 0.05)));
-    const entry = { file: head.file, start: head.start, bars: head.bars, lufs: head.lufs, at: new Date(wrote).toISOString(), offset };
-    state.current = entry;
-    state.history.push(entry);
-    state.queue = state.queue.filter((q) => q.id !== head.id);
-    if (state.queue[0]) delete state.queue[0].start; // it follows on from this one
-    writeState(opts.set, state);
-    fs.rmSync(head.snapshot, { force: true });
-    logSwap(opts.set, updated ? `swap ${head.file} at bar ${head.start}, evaluated ${offset >= 0 ? '+' : ''}${offset}s from the downbeat` : `swap ${head.file} at bar ${head.start}: NO strudel.update in the extension log, it may still play the old section`);
-  }
+  logLine(opts.set, `skip: ${head.file} moved to bar ${at}`);
+  const ready = isReady(head) ? '' : ` once it's rendered (${renderState(head, state)})`;
+  console.log(`skipping: ${head.file} swaps in at bar ${at}, in ${clock(timeOf(state, deck, at) - Date.now())}${ready}`);
 }
 
 function status(opts) {
-  const state = upgrade(requireState(opts.set));
+  const state = requireState(opts.set);
+  const deck = readDeck(opts.set);
+  const playing = Boolean(deck?.current && alive(state.player));
   const now = Date.now();
-  const cur = state.current;
-  const into = barAt(state, now) - cur.start;
-  const planned = schedule(state, now);
-  const next = planned[0]?.start ?? nextStart(state, now);
-  // with fewer than AHEAD queued: write now. otherwise wake just after the next
-  // swap, when the queue is one short again
-  const wake = planned.length >= AHEAD ? Math.round((timeOf(state, next) - now) / 1000) + 5 : 0;
+  const planned = schedule(state, deck, now);
+  const fmt = (q) => ({ file: q.file, start: q.start, in: q.start == null ? null : Math.round((timeOf(state, deck, q.start) - now) / 1000), render: renderState(q, state) });
+  if (!deck?.current) {
+    const first = state.queue[0];
+    const s = { bpm: state.bpm, playing: null, starting: first ? fmt(first) : null, player: Boolean(alive(state.player)), queue: planned.slice(1).map(fmt), ahead: planned.length - 1, target: AHEAD, wakeIn: 0 };
+    if (opts.json) return console.log(JSON.stringify(s, null, 2));
+    console.log(`${path.relative(process.cwd(), opts.set)} · ${state.bpm} bpm · not playing yet`);
+    if (first) console.log(`starting ${first.file}: ${s.starting.render}`);
+    if (!s.player) console.log('warning  the player isn\'t running: run start again (dj.log says why)');
+    console.log(`wake     now: write and queue the next ${AHEAD} sections while the first one renders`);
+    return;
+  }
+  const cur = deck.current;
+  const into = barAt(state, deck, now) - cur.start;
+  const next = planned[0]?.start ?? cur.start + cur.bars;
+  const wake = planned.length >= AHEAD ? Math.round((timeOf(state, deck, next) - now) / 1000) + 5 : 0;
   const s = {
     bpm: state.bpm,
-    section: state.history.length,
+    section: deck.history.length,
     playing: cur.file,
-    bar: Math.floor(into) % cur.bars,
+    bar: Math.max(0, Math.floor(into)),
     bars: cur.bars,
-    looped: into >= cur.bars,
-    endsIn: Math.round((timeOf(state, next) - now) / 1000),
+    endsIn: Math.round((timeOf(state, deck, next) - now) / 1000),
     ahead: planned.length,
     target: AHEAD,
-    queue: planned.map((q) => ({ file: q.file, start: q.start, in: Math.round((timeOf(state, q.start) - now) / 1000) })),
+    queue: planned.map(fmt),
+    now: state.now && !deck.played.includes(state.now.id) && state.now.of === cur.id ? { file: state.now.file, from: state.now.from, render: renderState(state.now, state) } : null,
     wakeIn: wake,
-    deck: planned.length ? Boolean(alive(state.deck)) : null,
-    lead: state.lead,
-    lastSwap: state.history.length > 1 ? state.history.at(-1).offset : null,
+    player: playing,
   };
   if (opts.json) return console.log(JSON.stringify(s, null, 2));
   console.log(`${path.relative(process.cwd(), opts.set)} · ${state.bpm} bpm · section ${s.section}`);
-  console.log(`playing  ${cur.file}  bar ${s.bar + 1}/${cur.bars}${s.looped ? '  (past its end: it restarted, queue the next one now)' : ''}`);
-  if (planned.length) planned.forEach((q, i) => console.log(`${i ? '        ' : 'queued  '} #${i + 1} ${q.file}  in ${clock(timeOf(state, q.start) - now)} at bar ${q.start}`));
-  else console.log(`queued   nothing: the next section can start in ${clock(timeOf(state, next) - now)} (bar ${next}) if queued before then`);
+  console.log(`playing  ${cur.file}  bar ${s.bar + 1}/${cur.bars}`);
+  if (s.now) console.log(`now      ${s.now.file} from bar ${s.now.from}: ${s.now.render}`);
+  planned.forEach((q, i) => {
+    const late = !isReady(q) && i === 0 && s.queue[0].in < 60 ? ' (may swap in late: the current section plays from its top again until it is)' : '';
+    console.log(`${i ? '        ' : 'queued  '} #${i + 1} ${q.file}  in ${clock(timeOf(state, deck, q.start) - now)} at bar ${q.start}, ${renderState(q, state)}${late}`);
+  });
+  if (!planned.length) console.log(`queued   nothing: the section plays from its top again in ${clock(timeOf(state, deck, next) - now)} unless something is queued`);
   console.log(`wake     ${wake ? `in ${clock(wake * 1000)}, just after the next swap` : `now: ${planned.length} of ${AHEAD} sections queued, write and queue ${AHEAD - planned.length} more before sleeping`}`);
-  if (s.deck === false) console.log('warning  the background deck isn\'t running: queue something again to restart it');
-  if (s.lastSwap !== null && Math.abs(s.lastSwap) > 0.3) console.log(`note     the last swap evaluated ${s.lastSwap}s from its downbeat (lead is now ${state.lead}s)`);
+  if (!playing) console.log('warning  the player isn\'t running: the music stopped. dj.log says why; start the set again with the current section');
 }
 
 async function wait(opts) {
   const until = Date.now() + opts.max * 1000;
-  let state = upgrade(requireState(opts.set));
-  if (!state.queue.length) return status(opts);
-  const swaps = state.history.length;
+  const state = requireState(opts.set);
+  const swaps = readDeck(opts.set)?.history.length ?? 0;
+  if (!pending(state, readDeck(opts.set)).length) return status(opts);
   while (Date.now() < until) {
-    state = readState(opts.set);
-    if (state.history.length !== swaps || !state.queue?.length) return status(opts);
+    const deck = readDeck(opts.set);
+    if ((deck?.history.length ?? 0) !== swaps || !alive(readState(opts.set)?.player)) return status(opts);
     await sleep(1000);
   }
   console.log('still waiting for the swap: run wait again');
   process.exit(3);
 }
 
-async function stop(opts) {
-  const state = upgrade(requireState(opts.set));
-  if (state.deck) kill(state.deck);
-  for (const q of state.queue) fs.rmSync(q.snapshot, { force: true });
-  state.queue = [];
-  state.deck = null;
+function stop(opts) {
+  const state = requireState(opts.set);
+  stopEverything(opts.set, state);
+  Object.assign(state, { queue: [], skip: null, now: null, player: null });
   writeState(opts.set, state);
-  await remote('stop', (m) => m.startsWith('strudel.stop'), 2000);
-  logSwap(opts.set, 'stop');
+  logLine(opts.set, 'stop');
   console.log('stopped');
 }
 
 const opts = parseArgs(process.argv.slice(2));
 if (opts.command === 'start') await start(opts);
 else if (opts.command === 'check') {
-  const c = check(opts.file, readState(opts.set));
+  const state = readState(opts.set);
+  const c = check(opts.file, state, readDeck(opts.set)?.history);
   printCheck(opts.file, c);
   process.exit(c.ok ? 0 : 1);
 } else if (opts.command === 'queue') queue(opts);
+else if (opts.command === 'now') now(opts);
 else if (opts.command === 'unqueue') unqueue(opts);
 else if (opts.command === 'skip') skip(opts);
-else if (opts.command === '_deck') await deck(opts);
 else if (opts.command === 'status') status(opts);
 else if (opts.command === 'wait') await wait(opts);
-else if (opts.command === 'stop') await stop(opts);
+else if (opts.command === 'stop') stop(opts);
+else if (opts.command === '_play') await play(opts);
+else if (opts.command === '_render') renderJob(opts);

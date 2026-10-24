@@ -6,6 +6,7 @@
 //     --bars <n>   bars rendered from the start of each section (default 2)
 //     --full       render the whole track instead (slower)
 //     --json       print a machine-readable report instead of text
+//     --workers <n> ranges rendered in parallel (default: cores - 2)
 //
 // exit code: 0 = valid (possibly with warnings), 1 = errors found, 2 = couldn't run
 //
@@ -26,7 +27,7 @@ function parseArgs(argv) {
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--full' || argv[i] === '--json') opts[argv[i].slice(2)] = true;
-    else if (argv[i] === '--bars') opts.bars = Number(argv[++i]);
+    else if (argv[i] === '--bars' || argv[i] === '--workers') opts[argv[i].slice(2)] = Number(argv[++i]);
     else rest.push(argv[i]);
   }
   if (rest.length !== 1) {
@@ -120,7 +121,7 @@ const ranges = opts.full
 const pageErrors = new Map();
 let browser;
 try {
-  browser = await openPages(Math.max(1, Math.min(ranges.length, os.availableParallelism() - 2)), (type, text) =>
+  browser = await openPages(Math.max(1, Math.min(ranges.length, opts.workers ?? os.availableParallelism() - 2)), (type, text) =>
     pageErrors.set(`${type}: ${text}`, (pageErrors.get(`${type}: ${text}`) ?? 0) + 1),
   );
 } catch (err) {
@@ -163,12 +164,8 @@ try {
   const missing = Object.entries(found.missing);
   for (const [name, m] of missing) {
     const asked = m.bank ? `s("${m.s}") with .bank("${m.bank}")` : `s("${m.s ?? 'triangle'}")`;
-    const why = name.startsWith('gm_')
-      ? 'soundfonts (gm_*) are not loaded by the toolkit, so this may still play in the extension'
-      : m.bank
-        ? `the ${m.bank} bank has no "${m.s}" sound (or the bank name is wrong)`
-        : 'no sample or synth with this name is loaded';
-    add(name.startsWith('gm_') ? 'warn' : 'error', 'sounds', `sound "${name}" not found: ${asked}, ${m.count} events from bar ${m.firstBar}. ${why}`, {
+    const why = m.bank ? `the ${m.bank} bank has no "${m.s}" sound (or the bank name is wrong)` : 'no sample, synth or soundfont with this name is loaded';
+    add('error', 'sounds', `sound "${name}" not found: ${asked}, ${m.count} events from bar ${m.firstBar}. ${why}`, {
       line: lines(m.locations).join(', ') || undefined,
     });
   }

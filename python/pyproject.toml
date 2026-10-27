@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strudelcli-audio"
+version = "1.0.0"
+description = "audio analysis behind strudelcli"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "soundfile", "pyloudnorm"]

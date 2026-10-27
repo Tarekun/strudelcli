@@ -4,5 +4,8 @@ strudel-remote
 
 node_modules
 .venv
+__pycache__/
+*.egg-info/
 
 live
+out/

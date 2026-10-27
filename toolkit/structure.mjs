@@ -3,7 +3,7 @@
 // feed which instruments (and which never reach the arrange), and notes on
 // abrupt or static stretches. reads the code only, so it's instant
 //
-//   node structure.mjs <track.strudel.js> [--json]
+//   strudelcli structure <track.strudel.js> [--json]
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,7 +16,7 @@ const args = process.argv.slice(2);
 const json = args.includes('--json');
 const [file] = args.filter((a) => !a.startsWith('--'));
 if (!file) {
-  console.error('usage: node structure.mjs <track.strudel.js> [--json]');
+  console.error('usage: strudelcli structure <track.strudel.js> [--json]');
   process.exit(2);
 }
 const code = fs.readFileSync(file, 'utf8');

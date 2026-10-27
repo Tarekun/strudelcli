@@ -2,7 +2,7 @@
 // pattern produces events, every sound it asks for exists, and it renders to
 // actual audio. meant to be run by an agent after editing a track
 //
-//   node validate.mjs <track.strudel.js> [options]
+//   strudelcli validate <track.strudel.js> [options]
 //     --bars <n>   bars rendered from the start of each section (default 2)
 //     --full       render the whole track instead (slower)
 //     --json       print a machine-readable report instead of text
@@ -31,7 +31,7 @@ function parseArgs(argv) {
     else rest.push(argv[i]);
   }
   if (rest.length !== 1) {
-    console.error('usage: node validate.mjs <track.strudel.js> [--bars n] [--full] [--json]');
+    console.error('usage: strudelcli validate <track.strudel.js> [--bars n] [--full] [--json]');
     process.exit(2);
   }
   opts.track = path.resolve(rest[0]);

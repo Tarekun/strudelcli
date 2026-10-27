@@ -4,6 +4,9 @@ Tracks in this repo are [Strudel](https://strudel.cc) code: `*.strudel.js` files
 (`techno/`, `house/`, `sets/`, ...). Most define their instruments as `const`s and lay them out in an
 `arrange([bars, stack(...)], ...)` at the bottom. The toolkit's instrument and section names come from that arrange.
 
+The toolkit is the `strudelcli` command. `strudelcli help` lists its commands, and `strudelcli help <command>` shows
+a command's options.
+
 You can't hear the music. Whether something *sounds* right is the user's call: when a change is about taste,
 say what you changed and ask them to listen.
 
@@ -14,12 +17,12 @@ small diff.
 
 - Don't touch the gain, filters or effects of existing instruments, and don't rebalance the mix, unless asked.
   Levels are the user's call.
-- Don't render, analyze loudness or run `review.sh` unless asked. Those results lead to extra code the user
+- Don't render, analyze loudness or run `strudelcli review` unless asked. Those results lead to extra code the user
   didn't request.
 - Don't refactor or tidy code you weren't asked to change.
-- After editing, run `node toolkit/validate.mjs <track>`. It must exit 0 (1 = errors, 2 = couldn't run). Fix
+- After editing, run `strudelcli validate <track>`. It must exit 0 (1 = errors, 2 = couldn't run). Fix
   errors, and read the warnings (clipping, silent sections).
-- Check that functions and sounds exist with `node toolkit/library.mjs functions <words>` or `sounds <query>`
+- Check that functions and sounds exist with `strudelcli find <name or words>`
   instead of guessing names.
 
 For designing a new instrument or track, or a mix pass, use the `compose` skill (`.agents/skills/compose`).
@@ -42,4 +45,4 @@ If it really has to change to fit, don't edit the copy. Ask the user, or derive 
 - **`slider()` silently breaks** evaluation in the user's VSCode Strudel extension. Use constants.
 - **`gm_*` soundfonts** take notes (`note("c3 e3").s("gm_epiano1")`) and `.n(i)` picks one of the instrument's fonts. Some fonts don't cover every note: validate reports "no soundfont buffer found" for notes that stay silent.
 - **`distort` and `shape` add a lot of level.** If you add one to an instrument you're writing, lower that instrument's `gain` to match.
-- **Sidechain:** an instrument on the orbit named in the kick's `duckorbit(n)` gets ducked by the kick. Solo measurements in `inspect.mjs` don't include that ducking.
+- **Sidechain:** an instrument on the orbit named in the kick's `duckorbit(n)` gets ducked by the kick. Solo measurements in `strudelcli inspect` don't include that ducking.

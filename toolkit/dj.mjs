@@ -4,15 +4,15 @@
 // current one ends. playback only streams finished audio, so it needs no VSCode,
 // and rendering or validating in the background can't make it crackle
 //
-//   node dj.mjs start  <set-dir> <section.strudel.js> [--minutes 5] [--target <sink>]
-//   node dj.mjs check  <set-dir> <section.strudel.js>
-//   node dj.mjs queue  <set-dir> <section.strudel.js> [--force] [--replace]
-//   node dj.mjs now    <set-dir> [<section.strudel.js>]
-//   node dj.mjs unqueue <set-dir> [n]
-//   node dj.mjs skip   <set-dir>
-//   node dj.mjs status <set-dir> [--json]
-//   node dj.mjs wait   <set-dir> [--max <sec>]
-//   node dj.mjs stop   <set-dir>
+//   strudelcli dj start  <set-dir> <section.strudel.js> [--minutes 5] [--target <sink>]
+//   strudelcli dj check  <set-dir> <section.strudel.js>
+//   strudelcli dj queue  <set-dir> <section.strudel.js> [--force] [--replace]
+//   strudelcli dj now    <set-dir> [<section.strudel.js>]
+//   strudelcli dj unqueue <set-dir> [n]
+//   strudelcli dj skip   <set-dir>
+//   strudelcli dj status <set-dir> [--json]
+//   strudelcli dj wait   <set-dir> [--max <sec>]
+//   strudelcli dj stop   <set-dir>
 //
 // <set-dir> is live/<name>/ by convention
 //
@@ -93,7 +93,7 @@ function parseArgs(argv) {
   const takesFile = needsFile || command === 'now';
   const known = takesFile || ['unqueue', 'skip', 'status', 'wait', 'stop', '_play', '_render'].includes(command);
   if (!known || !set || (needsFile && !file)) {
-    console.error('usage: node dj.mjs start|check|queue <set-dir> <section.strudel.js> | now <set-dir> [file] | unqueue|skip|status|wait|stop <set-dir>   (see the header)');
+    console.error('usage: strudelcli dj start|check|queue <set-dir> <section.strudel.js> | now <set-dir> [file] | unqueue|skip|status|wait|stop <set-dir>   (see the header)');
     process.exit(2);
   }
   if (takesFile && file && !fs.existsSync(file)) {
@@ -128,7 +128,7 @@ const logLine = (set, line) => fs.appendFileSync(path.join(set, 'dj.log'), `${ne
 function requireState(set) {
   const state = readState(set);
   if (!state) {
-    console.error(`no set in ${set}: node dj.mjs start <set-dir> <first section>`);
+    console.error(`no set in ${set}: strudelcli dj start <set-dir> <first section>`);
     process.exit(2);
   }
   if (state.live) {

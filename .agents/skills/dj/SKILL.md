@@ -5,9 +5,9 @@ description: Run a live DJ set through the speakers (no VSCode needed), writing 
 
 # DJ
 
-You run a live set: you keep **two sections queued ahead** of the one playing (5+ minutes each), and `toolkit/dj.mjs`
+You run a live set: you keep **two sections queued ahead** of the one playing (5+ minutes each), and `strudelcli dj`
 renders each one to audio in the background (about a minute) and swaps it in on the right bar. The music plays
-through PipeWire, not VSCode. With two ahead, a late wake-up still has a whole section of slack. Being on time matters more than polish. Don't run `validate.mjs`, `inspect.mjs`, `review.sh` or the
+through PipeWire, not VSCode. With two ahead, a late wake-up still has a whole section of slack. Being on time matters more than polish. Don't run `strudelcli validate`, `strudelcli inspect`, `strudelcli review` or the
 compose or review workflows during a set: `start` and `queue` already validate and measure each section, and its output is
 the only feedback you need.
 
@@ -15,14 +15,14 @@ the only feedback you need.
 
 | command | does |
 |---|---|
-| `node toolkit/dj.mjs start <set> <file>` | checks the first section and renders it; it starts playing when the render is done, usually within a minute |
-| `node toolkit/dj.mjs queue <set> <file>` | checks a section, adds it to the queue and renders it: each swaps in when the one before ends (not rendered by then = on a later 16-bar phrase). `--replace` empties the queue first |
-| `node toolkit/dj.mjs now <set> [file]` | re-renders the playing section from its edited file and swaps it in on the next phrase after that, usually within a minute |
-| `node toolkit/dj.mjs unqueue <set> [n]` | removes the n-th queued section (1 = next up), default the last |
-| `node toolkit/dj.mjs skip <set>` | cuts the current section short: the next queued one swaps in on the next 16-bar phrase |
-| `node toolkit/dj.mjs status <set> --json` | what plays, the queue with start times and render progress, `ahead` (sections queued), and `wakeIn`: 0 = write now, otherwise seconds to sleep |
-| `node toolkit/dj.mjs wait <set>` | blocks until the next queued section swaps in (exit 3 = run it again) |
-| `node toolkit/dj.mjs stop <set>` | stops playback and empties the queue |
+| `strudelcli dj start <set> <file>` | checks the first section and renders it; it starts playing when the render is done, usually within a minute |
+| `strudelcli dj queue <set> <file>` | checks a section, adds it to the queue and renders it: each swaps in when the one before ends (not rendered by then = on a later 16-bar phrase). `--replace` empties the queue first |
+| `strudelcli dj now <set> [file]` | re-renders the playing section from its edited file and swaps it in on the next phrase after that, usually within a minute |
+| `strudelcli dj unqueue <set> [n]` | removes the n-th queued section (1 = next up), default the last |
+| `strudelcli dj skip <set>` | cuts the current section short: the next queued one swaps in on the next 16-bar phrase |
+| `strudelcli dj status <set> --json` | what plays, the queue with start times and render progress, `ahead` (sections queued), and `wakeIn`: 0 = write now, otherwise seconds to sleep |
+| `strudelcli dj wait <set>` | blocks until the next queued section swaps in (exit 3 = run it again) |
+| `strudelcli dj stop <set>` | stops playback and empties the queue |
 
 `<set>` is `live/<name>/`. Don't edit its `dj.json` or `deck.json`.
 
@@ -47,7 +47,7 @@ its energy (1-5) and what it brings.
 of the planned length.
 
 - Copy instruments that continue verbatim from the previous section. The swap is a hard cut, so bar 0 should sound like a continuation.
-- Check new sounds and functions with `node toolkit/library.mjs`. Don't guess names.
+- Check new sounds and functions with `strudelcli find <name>`. Don't guess names.
 - Keep new instruments' gain near what similar instruments in the set use.
 
 ## 3. Improve it, then queue
@@ -59,7 +59,7 @@ the weakest points:
 - **Inside the instruments:** add variation across bars, such as `"<...>"` alternation, `.every(4, ...)`, `.sometimes(...)`, `.mask(...)`, or a slow filter sweep with `sine.slow(16).range(...)`. A one-bar riff repeated unchanged doesn't count as a phrase.
 - **The ending:** the last 8-16 bars should set up the next section: thin out, add a fill, or a riser.
 
-Make one pass, then `queue`. Don't run `validate.mjs` first: `queue` runs it, and its report is your feedback. Fix
+Make one pass, then `queue`. Don't run `strudelcli validate` first: `queue` runs it, and its report is your feedback. Fix
 every error it reports, then queue again. Fix a warning (clipping, level jump) only if it takes a
 single gain change. If you're stuck with under a minute left, queue a copy of the current section with one change.
 
@@ -81,7 +81,7 @@ Two ahead is the limit, though: more than that and the plan can't react to the u
 How to sleep:
 
 - **Claude Code:** in `/loop`, use `ScheduleWakeup` with `delaySeconds` set to `wakeIn` (at least 60).
-- **Other agents:** use your scheduler. With none, run `dj.mjs wait <set>`.
+- **Other agents:** use your scheduler. With none, run `strudelcli dj wait <set>`.
 - Never sleep longer than `wakeIn`, even when the plan says the next section is "easy".
 
 **Ending:** once the outro is queued, stop topping up the queue and ignore `wakeIn` 0: sleep until the outro has

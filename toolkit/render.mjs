@@ -1,7 +1,7 @@
 // offline renderer: plays a .strudel.js track in headless chromium through an
 // OfflineAudioContext (faster than real time) and writes float32 wavs
 //
-//   node render.mjs <track.strudel.js> [options]
+//   strudelcli render <track.strudel.js> [options]
 //     --out <dir>      output directory (default: out/<track name>)
 //     --from <bar>     first bar to render (default 0)
 //     --to <bar>       bar to stop at (default: end of the arrange)
@@ -36,7 +36,7 @@ function parseArgs(argv) {
     else rest.push(a);
   }
   if (rest.length !== 1) {
-    console.error('usage: node render.mjs <track.strudel.js> [--out dir] [--from bar] [--to bar] [--stems]');
+    console.error('usage: strudelcli render <track.strudel.js> [--out dir] [--from bar] [--to bar] [--stems]');
     process.exit(1);
   }
   opts.track = path.resolve(rest[0]);

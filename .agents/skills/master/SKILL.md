@@ -18,7 +18,7 @@ balance or a crushed crest factor, report that and stop. Fixing it means changin
 1. **Render with stems and review the mix.**
 
    ```sh
-   toolkit/review.sh <track>
+   strudelcli review <track>
    ```
 
    Read `toolkit/out/<track>/report.md`. If it lists clipping, clashes or band-balance problems, tell the
@@ -27,7 +27,7 @@ balance or a crushed crest factor, report that and stop. Fixing it means changin
 2. **Master.**
 
    ```sh
-   node toolkit/master.mjs <track> [--lufs -11] [--ceiling -1] [--glue] [--mp3]
+   strudelcli master <track> [--lufs -11] [--ceiling -1] [--glue] [--mp3]
    ```
 
    It reads `toolkit/out/<track>/mix.wav` and writes `master.wav` (16-bit, 44.1 kHz, dithered) next to it.
@@ -61,8 +61,8 @@ Never push loudness past the target to make a track "hit harder". Louder is not 
 
 ## Notes
 
-- `render.mjs` renders long tracks in chunks. The kick's sidechain can't duck tails that spill over a chunk
+- `strudelcli render` renders long tracks in chunks. The kick's sidechain can't duck tails that spill over a chunk
   boundary, so a tiny difference from the extension's playback is expected and isn't a mastering problem.
-- `review.sh` thresholds are tuned for unmastered techno. For other genres, treat them as hints.
-- `--reference some-track.wav` on `review.sh` compares band balance against a finished track. It is the
+- `strudelcli review` thresholds are tuned for unmastered techno. For other genres, treat them as hints.
+- `--reference some-track.wav` on `strudelcli review` compares band balance against a finished track. It is the
   only tonal evidence available to an agent, so use it when the user has a reference.

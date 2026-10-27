@@ -1,14 +1,18 @@
-// look things up in strudel: its functions (with their docs and examples) and
-// its sounds (synths, drum machine banks and sample sets), as loaded by the
-// toolkit and the VSCode extension
+// look things up in strudel by name: its functions (with their docs and
+// examples) and its sounds (synths, drum machine banks, soundfonts and sample
+// sets), as loaded by the toolkit and the VSCode extension
 //
-//   node library.mjs functions [query]   search functions by name, synonym or description
-//   node library.mjs function <name>     full docs of one function: params, synonyms, examples
-//   node library.mjs sounds [query]      search sounds: synths, bank sounds, sample sets
-//   node library.mjs banks [query]       drum machine banks with their sounds; the query
-//                                        matches bank names or a sound they have (banks cb)
-//   node library.mjs bank <name>         one bank: its sounds, how many variants each, usage
+//   strudelcli find <query>    functions, sounds and banks matching the query. a
+//                              query that names a function or a bank exactly
+//                              (lpf, RolandTR909) shows its full docs or its sounds
+//   strudelcli find --functions | --sounds | --banks [query]
+//                              only that kind (--sounds includes bank sounds);
+//                              without a query, the full list of it
 //   options: --json, --refresh (rebuild the cached list of what exists at runtime)
+//
+// functions match by name, synonym or description (every word has to match),
+// sounds and banks by name: find cb lists the banks that have a cowbell.
+// exit code: 0 = found something, 1 = nothing matches (closest names are printed)
 //
 // docs come from the jsdoc comments in the installed strudel packages (the
 // same source strudel.cc's reference is built from). what exists at runtime
@@ -19,18 +23,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { openPages, root } from './browser.mjs';
 
+const USAGE = 'usage: strudelcli find [query] [--functions] [--sounds] [--banks] [--json] [--refresh]';
+
 const args = process.argv.slice(2);
 const json = args.includes('--json');
 const refresh = args.includes('--refresh');
-const [command, ...words] = args.filter((a) => !a.startsWith('--'));
-const query = words.join(' ').trim();
-
-const USAGE = `usage: node library.mjs <command> [query] [--json] [--refresh]
-  functions [query]   search functions
-  function <name>     one function's docs
-  sounds [query]      search sounds
-  banks [query]       drum machine banks (query: bank name or a sound abbreviation)
-  bank <name>         one bank's sounds`;
+const kinds = ['functions', 'sounds', 'banks'].filter((k) => args.includes(`--${k}`));
+const query = args.filter((a) => !a.startsWith('--')).join(' ').trim();
+const unknown = args.find((a) => a.startsWith('--') && !['--json', '--refresh', ...kinds.map((k) => `--${k}`)].includes(a));
+if (unknown) {
+  console.error(`unknown option ${unknown}\n${USAGE}`);
+  process.exit(2);
+}
+// --sounds covers everything played with s(), banks included
+const want = { functions: !kinds.length || kinds.includes('functions'), sounds: !kinds.length || kinds.includes('sounds') };
+want.banks = want.sounds || kinds.includes('banks');
 
 // what the usual drum machine abbreviations stand for
 const DRUMS = {
@@ -206,14 +213,13 @@ function banksOf(sounds) {
 const variants = (s) => (s.variants > 1 ? `×${s.variants}` : '');
 const out = (data, text) => console.log(json ? JSON.stringify(data, null, 2) : text);
 
-// ---------------------------------------------------------------- commands
+// ---------------------------------------------------------------- functions
 
-if (!command) {
-  console.error(USAGE);
-  process.exit(2);
-}
+// each finder returns { exact, data, lines, names }: exact = the query names
+// one thing, lines = text to print (empty when nothing matches), names = what
+// exists, for suggestions
 
-if (command === 'functions' || command === 'function') {
+async function findFunctions() {
   const docs = parseDocs();
   const runtime = await snapshot();
   const available = new Set([...runtime.functions, ...runtime.methods]);
@@ -223,52 +229,63 @@ if (command === 'functions' || command === 'function') {
       .filter(Boolean)
       .join(', ');
   const undocumented = [...available].filter((n) => !docs.has(n) && ![...docs.values()].some((d) => d.synonyms.includes(n)) && /^[a-z]/.test(n));
+  const names = [...docs.keys(), ...undocumented];
 
-  if (command === 'function') {
-    const name = query;
-    const doc = docs.get(name) ?? [...docs.values()].find((d) => d.synonyms.includes(name));
-    if (!doc) {
-      const close = [...docs.keys(), ...undocumented].map((n) => [n, distance(n.toLowerCase(), name.toLowerCase())]).sort((a, b) => a[1] - b[1]).slice(0, 5).map(([n]) => n);
-      if (available.has(name)) out({ name, documented: false, available: true }, `${name}: exists at runtime but has no docs`);
-      else {
-        console.error(`no function "${name}". closest: ${close.join(', ')}`);
-        process.exit(1);
-      }
-      process.exit(0);
-    }
-    const lines = [`${doc.name}${doc.synonyms.length ? `  (synonyms: ${doc.synonyms.join(', ')})` : ''}  [${doc.file}]`];
+  if (!query) {
+    // every documented, user-facing function, grouped by source file
+    const byFile = {};
+    for (const d of docs.values()) if (!d.internal && !d.noAutocomplete) (byFile[d.file] ??= []).push(d.name);
+    const lines = [`${docs.size} documented functions (strudel ${version}). search with: find <words>`, ''];
+    for (const [file, list] of Object.entries(byFile).sort()) lines.push(`${file} (${list.length})`, `  ${list.sort().join(' ')}`, '');
+    return { data: { functions: byFile }, lines, names };
+  }
+
+  const doc = docs.get(query) ?? [...docs.values()].find((d) => d.synonyms.includes(query));
+  const words = query.toLowerCase().split(/\s+/);
+  const hits = [...docs.values()]
+    .filter((d) => d !== doc)
+    .map((d) => [d, score(d, words)])
+    .filter(([, s]) => s > 0)
+    .sort((a, b) => b[1] - a[1] || Number(a[0].internal) - Number(b[0].internal) || a[0].name.localeCompare(b[0].name))
+    .slice(0, 25)
+    .map(([d]) => d);
+  const bare = undocumented.filter((n) => n !== query && words.every((w) => n.toLowerCase().includes(w))).slice(0, 10);
+  const data = { functions: hits.map((d) => ({ name: d.name, synonyms: d.synonyms, summary: summary(d.description), file: d.file, flags: flags(d) || undefined })), undocumented: bare };
+  const lines = [];
+
+  if (doc) {
+    data.function = { ...doc, available: isAvailable(doc) };
+    lines.push(`${doc.name}${doc.synonyms.length ? `  (synonyms: ${doc.synonyms.join(', ')})` : ''}  [${doc.file}]`);
     if (flags(doc)) lines.push(`  ! ${flags(doc)}`);
     if (doc.description) lines.push('', doc.description);
     if (doc.params.length) lines.push('', 'params', ...doc.params.map((p) => `  ${p.name}${p.type ? ` {${p.type}}` : ''}  ${p.description}`));
     if (doc.returns) lines.push('', `returns ${doc.returns}`);
     for (const e of doc.examples) lines.push('', 'example', ...e.split('\n').map((l) => `  ${l}`));
-    out({ ...doc, available: isAvailable(doc) }, lines.join('\n'));
-  } else if (!query) {
-    // overview: every documented, user-facing function, grouped by source file
-    const byFile = {};
-    for (const d of docs.values()) if (!d.internal && !d.noAutocomplete) (byFile[d.file] ??= []).push(d.name);
-    const lines = [`${docs.size} documented functions (strudel ${version}). search with: functions <words>`, ''];
-    for (const [file, names] of Object.entries(byFile).sort()) lines.push(`${file} (${names.length})`, `  ${names.sort().join(' ')}`, '');
-    out(byFile, lines.join('\n'));
-  } else {
-    const words = query.toLowerCase().split(/\s+/);
-    const hits = [...docs.values()]
-      .map((d) => [d, score(d, words)])
-      .filter(([, s]) => s > 0)
-      .sort((a, b) => b[1] - a[1] || Number(a[0].internal) - Number(b[0].internal) || a[0].name.localeCompare(b[0].name))
-      .slice(0, 25)
-      .map(([d]) => d);
-    const bare = undocumented.filter((n) => words.every((w) => n.toLowerCase().includes(w))).slice(0, 10);
-    const lines = hits.map((d) => {
-      const f = flags(d);
-      return `${d.name}${d.synonyms.length ? ` (${d.synonyms.join(', ')})` : ''}: ${summary(d.description) || '-'}  [${d.file}]${f ? `  ! ${f}` : ''}`;
-    });
-    if (bare.length) lines.push('', `no docs, but exist at runtime: ${bare.join(' ')}`);
-    if (!lines.length) lines.push(`nothing matches "${query}"`);
-    else lines.push('', 'details: node toolkit/library.mjs function <name>');
-    out({ query, functions: hits.map((d) => ({ name: d.name, synonyms: d.synonyms, summary: summary(d.description), file: d.file, flags: flags(d) || undefined })), undocumented: bare }, lines.join('\n'));
+    // the full docs are what was asked for: the other hits are just pointers
+    const also = [...hits.map((d) => d.name), ...bare].slice(0, 10);
+    if (also.length) lines.push('', `see also: ${also.join(' ')}`);
+    return { exact: true, data, lines, names };
   }
-} else if (['sounds', 'banks', 'bank'].includes(command)) {
+  if (available.has(query)) {
+    data.function = { name: query, documented: false, available: true };
+    lines.push(`${query}: exists at runtime but has no docs`);
+  }
+  if (hits.length) {
+    if (lines.length) lines.push('');
+    lines.push('functions:');
+    for (const d of hits) {
+      const f = flags(d);
+      lines.push(`  ${d.name}${d.synonyms.length ? ` (${d.synonyms.join(', ')})` : ''}: ${summary(d.description) || '-'}  [${d.file}]${f ? `  ! ${f}` : ''}`);
+    }
+  }
+  if (bare.length) lines.push(...(lines.length ? [''] : []), `no docs, but exist at runtime: ${bare.join(' ')}`);
+  if (hits.length) lines.push('', 'details: find <name>');
+  return { exact: available.has(query), data, lines, names };
+}
+
+// ---------------------------------------------------------------- sounds and banks
+
+async function findSounds() {
   const sounds = (await snapshot()).sounds.filter((s) => !s.name.startsWith('_'));
   const banks = banksOf(sounds);
   const inBank = new Set(Object.values(banks).flat().map((s) => s.name));
@@ -276,37 +293,20 @@ if (command === 'functions' || command === 'function') {
   const fonts = sounds.filter((s) => s.type === 'soundfont');
   const samples = sounds.filter((s) => !['synth', 'soundfont'].includes(s.type) && !inBank.has(s.name));
   const bankLine = (name, list) => `${name}: ${list.map((s) => `${s.short}${variants(s)}`).join(' ')}`;
+  const names = [...synths, ...fonts, ...samples].map((s) => s.name).concat(Object.keys(banks));
+  const result = { sounds: { names }, banks: { names } };
 
-  if (command === 'bank') {
-    const name = Object.keys(banks).find((b) => b.toLowerCase() === query.toLowerCase());
-    if (!name) {
-      const close = Object.keys(banks).map((b) => [b, distance(b.toLowerCase(), query.toLowerCase())]).sort((a, b) => a[1] - b[1]).slice(0, 5).map(([b]) => b);
-      console.error(`no bank "${query}". closest: ${close.join(', ')}`);
-      process.exit(1);
-    }
-    const list = banks[name];
-    const lines = [`${name}: ${list.length} sounds`, ''];
-    for (const s of list) lines.push(`  ${s.short.padEnd(6)} ${String(s.variants ?? 1).padStart(3)} variant${s.variants === 1 ? ' ' : 's'}  ${DRUMS[s.short] ?? ''}`);
-    const first = list[0];
-    lines.push('', 'usage', `  s("${first.short}*4").bank("${name}")       // variant 0`, `  s("${first.short}:1*4").bank("${name}")     // variant 1, or .n(1)`);
-    out({ bank: name, sounds: list.map((s) => ({ name: s.short, variants: s.variants, meaning: DRUMS[s.short] })) }, lines.join('\n'));
-  } else if (command === 'banks') {
-    const q = query.toLowerCase();
-    const matching = Object.entries(banks).filter(([name, list]) => !q || name.toLowerCase().includes(q) || list.some((s) => s.short.toLowerCase() === q));
-    const lines = matching.map(([name, list]) => bankLine(name, list));
-    if (!lines.length) lines.push(`no bank is called or has a sound "${query}"`);
-    else lines.unshift(`${matching.length} banks${q ? ` matching "${query}"` : ''} (×n = variants, pick one with :n). sounds: ${Object.entries(DRUMS).map(([k, v]) => `${k} ${v}`).join(', ')}`, '');
-    out(Object.fromEntries(matching.map(([n, list]) => [n, list.map((s) => ({ name: s.short, variants: s.variants }))])), lines.join('\n'));
-  } else if (!query) {
+  if (!query) {
     const maps = {};
     // the EmuSP12 map registers plain drum names: what s("bd") plays without a bank
     for (const s of samples) (maps[s.map === 'EmuSP12' ? 'default drums, no .bank() (EmuSP12)' : s.map ?? 'other'] ??= []).push(s);
-    const lines = [
+    result.sounds.data = { synths: synths.map((s) => s.name), soundfonts: fonts.map((s) => s.name), banks: Object.keys(banks), samples: maps };
+    result.sounds.lines = [
       `${sounds.length} sounds (strudel ${version}, same sample maps as the VSCode extension)`,
       '',
       `synths (${synths.length}), no .bank(): ${synths.map((s) => s.name).sort().join(' ')}`,
       '',
-      `drum machine banks (${Object.keys(banks).length}): use s("bd").bank("<bank>"). list them: banks [query]`,
+      `drum machine banks (${Object.keys(banks).length}): use s("bd").bank("<bank>"). their sounds: find --banks`,
       `  ${Object.keys(banks).join(' ')}`,
       '',
       `soundfonts (${fonts.length}), General MIDI instruments played with note(), no .bank(), .n(i) picks the font: ${fonts.map((s) => s.name).join(' ')}`,
@@ -314,26 +314,82 @@ if (command === 'functions' || command === 'function') {
       'sample sets, used as s("<name>") or s("<name>:n"):',
       ...Object.entries(maps).map(([map, list]) => `  ${map} (${list.length}): ${list.slice(0, 40).map((s) => s.name).join(' ')}${list.length > 40 ? ' ...' : ''}`),
       '',
-      'search: sounds <query>',
+      'search: find <query>',
     ];
-    out({ synths: synths.map((s) => s.name), soundfonts: fonts.map((s) => s.name), banks: Object.keys(banks), samples: maps }, lines.join('\n'));
-  } else {
-    const q = query.toLowerCase();
-    const hitSynths = synths.filter((s) => s.name.toLowerCase().includes(q));
-    const hitBanks = Object.entries(banks)
-      .map(([name, list]) => [name, list.filter((s) => s.short.toLowerCase().includes(q) || name.toLowerCase().includes(q))])
-      .filter(([, list]) => list.length);
-    const hitSamples = samples.filter((s) => s.name.toLowerCase().includes(q));
-    const hitFonts = fonts.filter((s) => s.name.toLowerCase().includes(q));
-    const lines = [];
-    if (hitSynths.length) lines.push(`synths (no .bank()): ${hitSynths.map((s) => s.name).join(' ')}`, '');
-    if (hitFonts.length) lines.push(`soundfonts, as note(...).s("<name>"), no .bank(): ${hitFonts.map((s) => `${s.name}${variants(s)}`).join(' ')}`, '');
-    if (hitBanks.length) lines.push(`in ${hitBanks.length} banks, as s("<sound>").bank("<bank>"):`, ...hitBanks.slice(0, 30).map(([n, list]) => `  ${bankLine(n, list)}`), ...(hitBanks.length > 30 ? [`  ... ${hitBanks.length - 30} more`] : []), '');
-    if (hitSamples.length) lines.push('samples, as s("<name>"):', ...hitSamples.slice(0, 40).map((s) => `  ${s.name}${variants(s)}  [${s.map ?? s.type}]`), ...(hitSamples.length > 40 ? [`  ... ${hitSamples.length - 40} more`] : []));
-    if (!lines.length) lines.push(`no sound matches "${query}"`);
-    out({ synths: hitSynths, soundfonts: hitFonts, banks: Object.fromEntries(hitBanks.map(([n, l]) => [n, l.map((s) => ({ name: s.short, variants: s.variants }))])), samples: hitSamples }, lines.join('\n'));
+    result.banks.data = { banks: Object.fromEntries(Object.entries(banks).map(([n, list]) => [n, list.map((s) => ({ name: s.short, variants: s.variants }))])) };
+    result.banks.lines = [
+      `${Object.keys(banks).length} banks (×n = variants, pick one with :n). sounds: ${Object.entries(DRUMS).map(([k, v]) => `${k} ${v}`).join(', ')}`,
+      '',
+      ...Object.entries(banks).map(([name, list]) => bankLine(name, list)),
+    ];
+    return result;
   }
-} else {
-  console.error(USAGE);
-  process.exit(2);
+
+  const q = query.toLowerCase();
+  const bank = Object.keys(banks).find((b) => b.toLowerCase() === q);
+  if (bank) {
+    const list = banks[bank];
+    const lines = [`${bank}: ${list.length} sounds`, ''];
+    for (const s of list) lines.push(`  ${s.short.padEnd(6)} ${String(s.variants ?? 1).padStart(3)} variant${s.variants === 1 ? ' ' : 's'}  ${DRUMS[s.short] ?? ''}`);
+    const first = list[0];
+    lines.push('', 'usage', `  s("${first.short}*4").bank("${bank}")       // variant 0`, `  s("${first.short}:1*4").bank("${bank}")     // variant 1, or .n(1)`);
+    Object.assign(result.banks, { exact: true, data: { bank: { name: bank, sounds: list.map((s) => ({ name: s.short, variants: s.variants, meaning: DRUMS[s.short] })) } }, lines });
+  } else {
+    // a bank named like the query lists all its sounds, any other only the matching ones
+    const hits = Object.entries(banks)
+      .map(([name, list]) => [name, name.toLowerCase().includes(q) ? list : list.filter((s) => s.short.toLowerCase().includes(q))])
+      .filter(([, list]) => list.length);
+    // all of them when banks are what was asked for
+    const max = kinds.includes('banks') ? Infinity : 30;
+    const lines = hits.length
+      ? [
+          `in ${hits.length} banks${DRUMS[q] ? ` (${q} = ${DRUMS[q]})` : ''}, as s("<sound>").bank("<bank>"), ×n = variants:`,
+          ...hits.slice(0, max).map(([n, list]) => `  ${bankLine(n, list)}`),
+          ...(hits.length > max ? [`  ... ${hits.length - max} more: find --banks ${query}`] : []),
+        ]
+      : [];
+    Object.assign(result.banks, { data: { banks: Object.fromEntries(hits.map(([n, l]) => [n, l.map((s) => ({ name: s.short, variants: s.variants }))])) }, lines });
+  }
+
+  const hitSynths = synths.filter((s) => s.name.toLowerCase().includes(q));
+  const hitFonts = fonts.filter((s) => s.name.toLowerCase().includes(q));
+  const hitSamples = samples.filter((s) => s.name.toLowerCase().includes(q));
+  const lines = [];
+  if (hitSynths.length) lines.push(`synths (no .bank()): ${hitSynths.map((s) => s.name).join(' ')}`, '');
+  if (hitFonts.length) lines.push(`soundfonts, as note(...).s("<name>"), no .bank(): ${hitFonts.map((s) => `${s.name}${variants(s)}`).join(' ')}`, '');
+  if (hitSamples.length) lines.push('samples, as s("<name>"):', ...hitSamples.slice(0, 40).map((s) => `  ${s.name}${variants(s)}  [${s.map ?? s.type}]`), ...(hitSamples.length > 40 ? [`  ... ${hitSamples.length - 40} more`] : []));
+  if (lines.at(-1) === '') lines.pop();
+  const exact = [...hitSynths, ...hitFonts, ...hitSamples].some((s) => s.name.toLowerCase() === q);
+  Object.assign(result.sounds, { exact, data: { synths: hitSynths, soundfonts: hitFonts, samples: hitSamples }, lines });
+  return result;
 }
+
+// ---------------------------------------------------------------- find
+
+const sections = [];
+if (want.functions) sections.push(await findFunctions());
+if (want.sounds || want.banks) {
+  const found = await findSounds();
+  if (want.sounds) sections.push(found.sounds);
+  if (want.banks && (query || !want.sounds || kinds.includes('banks'))) sections.push(found.banks);
+}
+
+if (!query && !kinds.length) {
+  // no query and no kind: what there is and how to look
+  const [fns, snd] = sections;
+  const d = snd.data;
+  const counts = `${Object.values(fns.data.functions).flat().length} functions, ${d.synths.length} synths, ${d.banks.length} drum machine banks, ${d.soundfonts.length} soundfonts, ${Object.values(d.samples).flat().length} sample sets`;
+  out({ functions: fns.data.functions, ...d }, [`strudel ${version}: ${counts}`, '', USAGE, '  find <query>          functions, sounds and banks by name (and functions by description)', '  find --functions      every function, by source file', '  find --sounds         every synth, soundfont, bank and sample set', '  find --banks          every bank with its sounds'].join('\n'));
+  process.exit(0);
+}
+
+// exact matches first: they're what the query asked for
+const shown = sections.filter((s) => s.lines.length).sort((a, b) => Number(!!b.exact) - Number(!!a.exact));
+if (!shown.length) {
+  const all = [...new Set(sections.flatMap((s) => s.names))];
+  const close = all.map((n) => [n, distance(n.toLowerCase(), query.toLowerCase())]).sort((a, b) => a[1] - b[1]).slice(0, 8).map(([n]) => n);
+  if (json) console.log(JSON.stringify({ query, found: false, closest: close }, null, 2));
+  else console.error(`nothing matches "${query}". closest: ${close.join(', ')}`);
+  process.exit(1);
+}
+out(Object.assign({ query }, ...shown.map((s) => s.data)), shown.map((s) => s.lines.join('\n')).join('\n\n'));

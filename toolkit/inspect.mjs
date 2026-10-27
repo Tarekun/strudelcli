@@ -3,7 +3,7 @@
 // its level, share of the section, frequency range, stereo width, envelope
 // and overlaps with other instruments (from short solo renders)
 //
-//   node inspect.mjs <track.strudel.js> [instrument ...] [options]
+//   strudelcli inspect <track.strudel.js> [instrument ...] [options]
 //     --bars <n>     bars rendered from the start of each section (default 4)
 //     --no-audio     pattern analysis only: rhythm, notes, chords (instant)
 //     --workers <n>  renders in parallel (default: cores - 2)
@@ -14,7 +14,7 @@
 // to the ear, not to a meter, which the kick would dominate
 //
 // instrument names are the expressions stacked in the arrange, as listed by
-// structure.mjs (kickFill, lead, kick.mask("<1!3 [1 1 1 0]>"), ...)
+// strudelcli structure (kickFill, lead, kick.mask("<1!3 [1 1 1 0]>"), ...)
 //
 // levels come from each instrument rendered alone, so instruments ducked by
 // the kick's sidechain measure a bit louder than they are in the mix
@@ -42,7 +42,7 @@ function parseArgs(argv) {
     else rest.push(a);
   }
   if (!rest.length) {
-    console.error('usage: node inspect.mjs <track.strudel.js> [instrument ...] [--bars n] [--no-audio] [--json]');
+    console.error('usage: strudelcli inspect <track.strudel.js> [instrument ...] [--bars n] [--no-audio] [--json]');
     process.exit(2);
   }
   [opts.track, ...opts.only] = rest;

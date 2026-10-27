@@ -3,9 +3,9 @@
 // "like this one", "like this one but longer and darker", or "the brightest
 // hats", then hear the candidates in a numbered audition reel
 //
-//   node browse.mjs list <kind> [--sort <feature>] [--top n]
-//   node browse.mjs like <sound> [--more <feature>] [--less <feature>] [--kind <kind>] [--top n]
-//   node browse.mjs audition <candidate ...> [options]
+//   strudelcli browse list <kind> [--sort <feature>] [--top n]
+//   strudelcli browse like <sound> [--more <feature>] [--less <feature>] [--kind <kind>] [--top n]
+//   strudelcli browse audition <candidate ...> [options]
 //
 // kind      a sound name or drum abbreviation: bd, sd, cp, hh, oh, cr, rd, lt, perc, ...
 //           (every bank's <kind> plus plain sample sets of that name)
@@ -67,7 +67,7 @@ function parseArgs(argv) {
   for (const f of [...opts.more, ...opts.less, opts.sort?.replace(/^-/, '')].filter(Boolean))
     if (!FEATURES[f]) fail(`unknown feature "${f}": ${Object.keys(FEATURES).join(', ')}`);
   const ok = { list: 1, like: 1, audition: Infinity }[opts.command];
-  if (!ok || !opts.items.length || opts.items.length > ok) fail('usage: node browse.mjs list <kind> | like <sound> | audition <candidate ...>   (see the header)');
+  if (!ok || !opts.items.length || opts.items.length > ok) fail('usage: strudelcli browse list <kind> | like <sound> | audition <candidate ...>   (see the header)');
   return opts;
 }
 

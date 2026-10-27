@@ -2,17 +2,17 @@
 // compression, gain to the loudness target, true-peak limiter) and writes a
 // playable file next to the mix. it never touches mix.wav
 //
-//   node master.mjs <track.strudel.js | out/<track>> [options]
+//   strudelcli master <track.strudel.js | out/<track>> [options]
 //     --lufs <n>       integrated loudness target (default -11)
 //     --ceiling <n>    true-peak ceiling in dBTP (default -1)
 //     --glue           add light bus compression (1.5:1, slow attack)
 //     --mp3            also write master.mp3 (320 kbps)
 //     --json           print a machine-readable report instead of text
 //
-// reads <out>/mix.wav (render it first with render.mjs or review.sh), writes
+// reads <out>/mix.wav (render it first with strudelcli render or strudelcli review), writes
 // <out>/master.wav (16-bit, triangular dither) and prints before and after
 //
-// this fixes loudness and peaks, not a bad mix: if review.sh reports clashes
+// this fixes loudness and peaks, not a bad mix: if strudelcli review reports clashes
 // or a bad band balance, fix the track instead of mastering over it
 
 import { spawnSync } from 'node:child_process';
@@ -34,7 +34,7 @@ function parseArgs(argv) {
     else rest.push(a);
   }
   if (rest.length !== 1 || Number.isNaN(opts.lufs) || Number.isNaN(opts.ceiling) || opts.ceiling > 0) {
-    console.error('usage: node master.mjs <track.strudel.js | out/<track>> [--lufs n] [--ceiling n (<= 0)] [--glue] [--mp3] [--json]');
+    console.error('usage: strudelcli master <track.strudel.js | out/<track>> [--lufs n] [--ceiling n (<= 0)] [--glue] [--mp3] [--json]');
     process.exit(2);
   }
   const target = path.resolve(rest[0]);
@@ -118,7 +118,7 @@ const report = {
 if (Math.abs(final.lufs - opts.lufs) > 0.5)
   report.warnings.push(`loudness ${round(final.lufs)} LUFS is off the ${opts.lufs} target: the limiter can't reach it without heavy squashing, the mix is too peaky`);
 if (final.peak > opts.ceiling + 0.2) report.warnings.push(`true peak ${round(final.peak)} dBTP is above the ${opts.ceiling} ceiling`);
-if (final.lra < 3) report.warnings.push(`loudness range is ${round(final.lra)} LU: heavily compressed, check the crest factor in review.sh`);
+if (final.lra < 3) report.warnings.push(`loudness range is ${round(final.lra)} LU: heavily compressed, check the crest factor in strudelcli review`);
 if (gain > 8) report.warnings.push(`needed +${round(gain)} dB of gain: the mix was quiet, consider raising levels in the track`);
 
 if (opts.json) console.log(JSON.stringify(report, null, 2));
